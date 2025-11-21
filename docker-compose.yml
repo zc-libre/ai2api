@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  antigravity-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: antigravity-api
+    ports:
+      - "8045:8045"
+    volumes:
+      # 挂载配置文件（必须先创建 config.json）
+      - ./config.json:/app/config.json:ro
+      # 挂载数据目录（持久化 tokens 和日志）
+      - ./data:/app/data
+      # 可选：挂载自定义 public 目录
+      - ./public:/app/public:ro
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8045/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - antigravity-network
+
+networks:
+  antigravity-network:
+    driver: bridge

@@ -1,0 +1,24 @@
+{
+  "server": {
+    "port": 8045,
+    "host": "0.0.0.0"
+  },
+  "api": {
+    "url": "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+    "modelsUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels",
+    "host": "daily-cloudcode-pa.sandbox.googleapis.com",
+    "userAgent": "antigravity/1.11.3 windows/amd64"
+  },
+  "defaults": {
+    "temperature": 1,
+    "top_p": 0.85,
+    "top_k": 50,
+    "max_tokens": 8096
+  },
+  "security": {
+    "maxRequestSize": "50mb",
+    "apiKey": "sk-your-main-api-key-here",
+    "adminPassword": "your-secure-admin-password-here"
+  },
+  "systemInstruction": ""
+}
