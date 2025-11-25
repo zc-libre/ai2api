@@ -31,11 +31,19 @@ export async function loadLogs() {
   await ensureDataDir();
   try {
     const data = await fs.readFile(LOGS_FILE, 'utf-8');
-    logsCache = JSON.parse(data);
+    const trimmed = data.trim();
+    // 处理空文件或无效JSON
+    if (!trimmed) {
+      logsCache = [];
+      lastCacheTime = now;
+      return [];
+    }
+    logsCache = JSON.parse(trimmed);
     lastCacheTime = now;
     return logsCache;
   } catch (error) {
-    if (error.code === 'ENOENT') {
+    // 文件不存在或JSON解析失败，返回空数组
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) {
       logsCache = [];
       lastCacheTime = now;
       return [];

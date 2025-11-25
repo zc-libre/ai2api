@@ -13,8 +13,8 @@ services:
       - ./config.json:/app/config.json:ro
       # 挂载数据目录（持久化 tokens 和日志）
       - ./data:/app/data
-      # 可选：挂载自定义 public 目录
-      - ./public:/app/public:ro
+      # 挂载前端构建输出目录（需要先运行 pnpm build）
+      - ./frontend/dist:/app/public:ro
     environment:
       - NODE_ENV=production
     restart: unless-stopped
