@@ -29,11 +29,9 @@ const SUPPORTED_MODELS = new Set([
 // Claude 别名映射
 const CLAUDE_MODEL_MAP = {
   'claude-sonnet-4.5': 'claude-sonnet-4-5',
-  'claude-3-5-sonnet-20241022': 'claude-sonnet-4-5',
-  'claude-3-5-sonnet-20240620': 'claude-sonnet-4-5',
   'claude-opus-4': 'gemini-3-pro-high',
-  'claude-haiku-4': 'gemini-2.5-flash',
-  'claude-3-haiku-20240307': 'gemini-2.5-flash'
+  'claude-sonnet-4-5-20250929': 'claude-sonnet-4-5',
+  'claude-haiku-4-5-20251001': 'gemini-2.5-flash-lite'
 };
 
 const DEFAULT_GEMINI_MODEL = 'claude-sonnet-4-5';
