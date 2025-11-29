@@ -4,6 +4,7 @@
 !.env.example
 config.json
 *.json.backup
+accounts.ndjson
 
 # Node.js
 node_modules/

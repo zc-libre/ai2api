@@ -10,7 +10,7 @@ import { withRetry } from "./utils/retry.js";
 import { GPTMailClient } from "./email/gptmail-client.js";
 import { RegisterAccountOptions } from "./browser/register-handler.js";
 import { ProfileStore } from "./browser/profile-store.js";
-import { loginWithCamoufox, registerWithCamoufox, checkCamoufoxInstalled } from "./browser/camoufox-bridge.js";
+import { loginWithCamoufox, registerWithCamoufox, ensureCamoufoxInstalled } from "./browser/camoufox-bridge.js";
 
 interface RegistrationWorkflow {
     mailClient: GPTMailClient;
@@ -50,28 +50,37 @@ export async function autoRegisterAndLogin(options: AutoLoginOptions): Promise<A
         const deviceAuth = await startDeviceAuthorization(clientId, clientSecret, config.proxyManager);
         logger.info("设备授权已获取", { verificationUrl: deviceAuth.verificationUriComplete });
 
-        // 开始轮询 token
-        const tokenPromise = pollForTokens(
+        let finalCredentials: AWSCredentials;
+
+        // 创建一个可控的 Token 轮询函数
+        const startTokenPolling = (timeoutSec: number) => pollForTokens(
             clientId,
             clientSecret,
             deviceAuth.deviceCode,
             deviceAuth.interval,
             deviceAuth.expiresIn,
-            config.proxyManager
+            config.proxyManager,
+            timeoutSec
         );
 
-        let finalCredentials: AWSCredentials;
+        // 开始初始 Token 轮询（10 分钟超时，不阻塞）
+        let tokenPromise = startTokenPolling(600);
+        let tokenError: Error | null = null;
+        
+        // 捕获 Token 轮询错误，但不让它中断主流程
+        tokenPromise = tokenPromise.catch((err) => {
+            tokenError = err;
+            logger.warn("Token 轮询超时，等待浏览器流程完成后重试");
+            return null as any;
+        });
 
         // 根据配置选择浏览器引擎
         if (config.browserEngine === "camoufox") {
             // 使用 Camoufox（Firefox 反检测浏览器）
             logger.info("使用 Camoufox 浏览器引擎");
             
-            // 检查 Camoufox 是否已安装
-            const installed = await checkCamoufoxInstalled();
-            if (!installed) {
-                throw new Error("Camoufox 未安装，请先运行: cd camoufox && bash setup.sh");
-            }
+            // 确保 Camoufox 已安装（未安装时自动安装）
+            await ensureCamoufoxInstalled();
 
             if (options.registration) {
                 // 使用 Camoufox 注册模式
@@ -131,8 +140,18 @@ export async function autoRegisterAndLogin(options: AutoLoginOptions): Promise<A
             finalCredentials = await executeWithPlaywright();
         }
 
-        // 等待 Token
-        const tokens = await tokenPromise;
+        // 等待 Token（如果初始轮询已完成）
+        let tokens = await tokenPromise;
+        
+        // 如果初始轮询超时了，浏览器流程已完成，再次尝试获取 Token
+        if (!tokens && tokenError) {
+            logger.info("浏览器流程已完成，重新开始 Token 轮询");
+            tokens = await startTokenPolling(120);  // 再给 2 分钟
+        }
+        
+        if (!tokens) {
+            throw new Error("无法获取 Token，授权可能未完成");
+        }
 
         const account: AccountRecord = {
             clientId,
@@ -206,10 +225,6 @@ async function main(): Promise<void> {
         if (!config.gptmail) {
             throw new Error("未配置 GPTMail API，无法使用临时邮箱注册模式");
         }
-        const password = process.env.AWS_TEMP_PASSWORD ?? process.env.AWS_PASSWORD;
-        if (!password) {
-            throw new Error("请通过 AWS_TEMP_PASSWORD 或 AWS_PASSWORD 提供注册用密码");
-        }
         const mailClient = new GPTMailClient({
             baseUrl: config.gptmail.baseUrl,
             apiKey: config.gptmail.apiKey,
@@ -218,7 +233,6 @@ async function main(): Promise<void> {
             defaultTimeoutMs: config.gptmail.timeoutMs
         });
         const registrationOptions: RegisterAccountOptions = {
-            password,
             fullName: process.env.AWS_FULL_NAME,
             prefix: config.gptmail.emailPrefix,
             domain: config.gptmail.emailDomain,

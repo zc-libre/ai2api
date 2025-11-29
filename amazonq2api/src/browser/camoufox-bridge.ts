@@ -26,8 +26,8 @@ export interface CamoufoxOptions {
 export interface CamoufoxRegistrationOptions extends CamoufoxOptions {
     /** GPTMail 配置 */
     gptmail: GPTMailConfig;
-    /** 密码 */
-    password: string;
+    /** 密码（可选，未提供时由 Python 自动生成） */
+    password?: string;
     /** 显示名称 */
     fullName?: string;
 }
@@ -184,11 +184,15 @@ export async function registerWithCamoufox(
         scriptPath,
         "--url", verificationUrl,
         "--mode", "register",
-        "--password", options.password,
         "--gptmail-url", options.gptmail.baseUrl,
         "--gptmail-key", options.gptmail.apiKey,
         "--json"
     ];
+    
+    // 密码可选，未提供时由 Python 自动生成
+    if (options.password) {
+        args.push("--password", options.password);
+    }
     
     if (options.gptmail.emailPrefix) {
         args.push("--email-prefix", options.gptmail.emailPrefix);
@@ -291,24 +295,106 @@ export async function registerWithCamoufox(
 }
 
 /**
- * 检查 Camoufox 环境是否已安装
+ * 检查 Camoufox 环境是否已安装（包括扩展验证）
  */
 export async function checkCamoufoxInstalled(): Promise<boolean> {
     const camoufoxDir = path.resolve(__dirname, "../../camoufox");
     const pythonPath = path.join(camoufoxDir, ".venv/bin/python");
     
+    // 完整验证脚本：检查导入 + 尝试启动浏览器（会验证扩展）
+    const verifyScript = `
+from camoufox.sync_api import Camoufox
+with Camoufox(headless=True) as browser:
+    page = browser.new_page()
+    page.goto('about:blank')
+print('ok')
+`;
+    
     return new Promise((resolve) => {
-        const process = spawn(pythonPath, ["-c", "from camoufox.sync_api import Camoufox; print('ok')"], {
-            cwd: camoufoxDir
+        const process = spawn(pythonPath, ["-c", verifyScript], {
+            cwd: camoufoxDir,
+            timeout: 30000  // 30秒超时
+        });
+        
+        let stdout = "";
+        
+        process.stdout.on("data", (data) => {
+            stdout += data.toString();
         });
         
         process.on("close", (code) => {
-            resolve(code === 0);
+            resolve(code === 0 && stdout.includes("ok"));
         });
         
         process.on("error", () => {
             resolve(false);
         });
     });
+}
+
+/**
+ * 自动安装 Camoufox 环境
+ */
+export async function installCamoufox(): Promise<void> {
+    const camoufoxDir = path.resolve(__dirname, "../../camoufox");
+    const setupScript = path.join(camoufoxDir, "setup.sh");
+    
+    logger.info("开始自动安装 Camoufox...");
+    
+    return new Promise((resolve, reject) => {
+        const process = spawn("bash", [setupScript], {
+            cwd: camoufoxDir,
+            stdio: "pipe",
+            env: {
+                ...globalThis.process.env,
+                // 确保非交互式
+                DEBIAN_FRONTEND: "noninteractive"
+            }
+        });
+        
+        process.stdout.on("data", (data) => {
+            const text = data.toString().trim();
+            if (text) {
+                logger.info("[Camoufox 安装]", { output: text });
+            }
+        });
+        
+        process.stderr.on("data", (data) => {
+            const text = data.toString().trim();
+            if (text) {
+                logger.warn("[Camoufox 安装]", { output: text });
+            }
+        });
+        
+        process.on("close", (code) => {
+            if (code === 0) {
+                logger.info("Camoufox 安装完成");
+                resolve();
+            } else {
+                reject(new Error(`Camoufox 安装失败，退出码: ${code}`));
+            }
+        });
+        
+        process.on("error", (error) => {
+            reject(new Error(`Camoufox 安装脚本执行失败: ${error.message}`));
+        });
+    });
+}
+
+/**
+ * 确保 Camoufox 已安装，如果未安装则自动安装
+ */
+export async function ensureCamoufoxInstalled(): Promise<void> {
+    const installed = await checkCamoufoxInstalled();
+    if (!installed) {
+        logger.info("检测到 Camoufox 未安装，开始自动安装...");
+        await installCamoufox();
+        
+        // 安装后再次验证
+        const verifyInstalled = await checkCamoufoxInstalled();
+        if (!verifyInstalled) {
+            throw new Error("Camoufox 自动安装后验证失败，请手动运行: cd camoufox && bash setup.sh");
+        }
+    }
 }
 

@@ -11,11 +11,11 @@ import random
 import argparse
 import re
 import requests
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from dataclasses import dataclass, asdict
 
 from camoufox.sync_api import Camoufox
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Page, Frame, Locator, TimeoutError as PlaywrightTimeout
 
 # 尝试导入 pyotp（用于 MFA）
 try:
@@ -55,6 +55,70 @@ class LoginResult:
 def random_delay(min_ms: int = 500, max_ms: int = 2000) -> None:
     """模拟人类操作的随机延迟"""
     time.sleep(random.randint(min_ms, max_ms) / 1000)
+
+
+def get_all_frames(page: Page) -> List[Frame]:
+    """返回页面内的所有 frame（包含主 frame），用于在 iframe 中查找控件。"""
+    frames: List[Frame] = []
+    seen_ids = set()
+    try:
+        main_frame = page.main_frame
+        if main_frame and id(main_frame) not in seen_ids:
+            frames.append(main_frame)
+            seen_ids.add(id(main_frame))
+    except Exception:
+        pass
+    
+    for frame in page.frames:
+        if not frame:
+            continue
+        frame_id = id(frame)
+        if frame_id in seen_ids:
+            continue
+        frames.append(frame)
+        seen_ids.add(frame_id)
+    
+    return frames
+
+
+def locator_is_visible(locator: Locator, timeout: int = 2000) -> bool:
+    """确保定位到的元素可见，可 fallback 到 bounding_box 检测。"""
+    try:
+        return locator.is_visible(timeout=timeout)
+    except Exception:
+        try:
+            box = locator.bounding_box()
+            return bool(box and box.get("width") and box.get("height"))
+        except Exception:
+            return False
+
+
+def human_like_click(page: Page, locator: Locator, description: str = "目标元素") -> bool:
+    """在点击元素前进行滚动与鼠标移动，统一采用人类化点击逻辑。"""
+    try:
+        locator.scroll_into_view_if_needed(timeout=2000)
+    except Exception:
+        pass
+    
+    try:
+        box = locator.bounding_box()
+        if box:
+            human_mouse_move(
+                page,
+                int(box["x"] + box["width"] / 2),
+                int(box["y"] + box["height"] / 2)
+            )
+    except Exception:
+        pass
+    
+    random_delay(300, 600)
+    
+    try:
+        locator.click(timeout=5000)
+        return True
+    except Exception as click_err:
+        print(f"[!] {description} 点击失败: {click_err}")
+        return False
 
 
 def center_browser_window(page: Page, width: int = 1280, height: int = 800) -> None:
@@ -585,50 +649,65 @@ def fill_name_step(page: Page, display_name: str) -> bool:
     """填写姓名步骤"""
     print(f"[*] 填写姓名: {display_name}")
     
+    # 等待页面加载
+    wait_for_page_ready(page, 15000)
+    random_delay(2000, 3000)
+    
     name_selectors = [
         'input[placeholder*="Maria"]',
         'input[placeholder*="name" i]',
         'input[name="fullName"]',
         'input[name="displayName"]',
-        'input[autocomplete="name"]'
+        'input[autocomplete="name"]',
+        'input[type="text"]',  # 备用：页面上可能只有一个文本输入框
     ]
     
-    for selector in name_selectors:
-        try:
-            locator = page.locator(selector).first
-            if locator.is_visible(timeout=3000):
-                # 模拟人类操作
-                try:
-                    box = locator.bounding_box()
-                    if box:
-                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
-                except:
-                    pass
-                
-                random_delay(500, 1000)
-                locator.click()
-                random_delay(300, 600)
-                
-                # 逐字符输入
-                for char in display_name:
-                    locator.type(char, delay=random.randint(80, 180))
-                    if random.random() < 0.1:
-                        random_delay(100, 300)
-                
-                print(f"[+] 已填写姓名: {display_name}")
-                
-                # 点击继续
-                random_delay(1000, 2000)
-                if click_continue_button(page):
-                    print("[+] 姓名步骤完成")
-                else:
-                    print("[!] 未能点击继续按钮，尝试按 Enter")
-                    page.keyboard.press("Enter")
+    # 多次尝试查找姓名输入框（页面可能加载较慢）
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        print(f"[*] 尝试查找姓名输入框 ({attempt + 1}/{max_attempts})...")
+        
+        for selector in name_selectors:
+            try:
+                locator = page.locator(selector).first
+                if locator.is_visible(timeout=5000):
+                    # 模拟人类操作
+                    try:
+                        box = locator.bounding_box()
+                        if box:
+                            human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                    except:
+                        pass
+                    
                     random_delay(500, 1000)
-                return True
-        except Exception as e:
-            print(f"[!] 填写姓名时出错: {e}")
-            continue
+                    locator.click()
+                    random_delay(300, 600)
+                    
+                    # 逐字符输入
+                    for char in display_name:
+                        locator.type(char, delay=random.randint(80, 180))
+                        if random.random() < 0.1:
+                            random_delay(100, 300)
+                    
+                    print(f"[+] 已填写姓名: {display_name}")
+                    
+                    # 点击继续
+                    random_delay(1000, 2000)
+                    if click_continue_button(page):
+                        print("[+] 姓名步骤完成")
+                    else:
+                        print("[!] 未能点击继续按钮，尝试按 Enter")
+                        page.keyboard.press("Enter")
+                        random_delay(500, 1000)
+                    return True
+            except Exception as e:
+                continue
+        
+        # 本次尝试未找到，等待后重试
+        if attempt < max_attempts - 1:
+            print(f"[*] 未找到姓名输入框，等待后重试...")
+            random_delay(3000, 5000)
+            wait_for_page_ready(page, 10000)
     
     print("[!] 未找到姓名输入框")
     return False
@@ -996,98 +1075,163 @@ def click_allow_button(page: Page) -> bool:
     
     random_delay(1000, 2000)
     
+    def click_by_selector(selector: str) -> bool:
+        frames = get_all_frames(page)
+        for frame in frames:
+            try:
+                locator = frame.locator(selector)
+                if locator.count() == 0:
+                    continue
+            except Exception:
+                continue
+            
+            candidate = locator.first
+            if not locator_is_visible(candidate):
+                continue
+            
+            if human_like_click(page, candidate, f"授权按钮 {selector}"):
+                print(f"[+] 已点击授权按钮 (selector): {selector}")
+                return True
+        return False
+    
+    def click_by_role(role: str, name: str) -> bool:
+        frames = get_all_frames(page)
+        for frame in frames:
+            try:
+                locator = frame.get_by_role(role, name=name)
+                if locator.count() == 0:
+                    continue
+            except Exception:
+                continue
+            
+            candidate = locator.first
+            if not locator_is_visible(candidate):
+                continue
+            
+            if human_like_click(page, candidate, f"{name} ({role})"):
+                print(f"[+] 已点击授权按钮: {name}")
+                return True
+        return False
+    
     # 方法1: 通过特定的 ID 或 data-analytics/data-testid 属性查找
     specific_selectors = [
-        # Allow access 页面（数据访问授权）
-        'button[data-testid="allow-access-button"]',  # Allow access 按钮
-        'button[data-analytics="consent-allow-access"]',  # Allow access 按钮
-        # Authorization requested 页面（认证确认）
-        'button#cli_verification_btn',  # 认证确认按钮
-        'button[data-analytics="accept-user-code"]',  # 认证确认按钮
+        'button[data-testid="allow-access-button"]',
+        'button[data-testid="allow-access-primary-button"]',
+        'button[data-analytics="consent-allow-access"]',
+        'button[data-analytics="accept-user-code"]',
         'button[data-testid="confirm-button"]',
         'button[data-testid="allow-button"]',
+        'button[data-testid*="allow-access"]',
+        'button#cli_verification_btn',
+        'button[id*="allow"]',
+        'button[name*="allow"]',
+        'button[aria-label*="Allow"]',
+        'button[aria-label*="allow"]',
+        'button[data-action*="allow"]',
+        'button.awsui-button-variant-primary:has-text("Allow access")',
+        'button.awsui-button-variant-primary:has-text("Allow")',
+        '[data-testid="allow-access-button"] button',
+        '[data-testid*="allow-access"] button',
+        'input[type="submit"][value*="Allow"]',
+        'input[type="submit"][value*="允许"]',
+        'input[type="submit"][aria-label*="Allow"]',
     ]
     
     for selector in specific_selectors:
-        try:
-            btn = page.locator(selector).first
-            if btn.is_visible(timeout=2000):
-                # 移动鼠标到按钮
-                try:
-                    box = btn.bounding_box()
-                    if box:
-                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
-                except:
-                    pass
-                random_delay(500, 1000)
-                btn.click()
-                print(f"[+] 已点击授权按钮 (selector): {selector}")
-                return True
-        except Exception:
-            continue
+        if click_by_selector(selector):
+            return True
     
-    # 方法2: 通过按钮文字查找
+    # 方法2: 通过按钮文字查找（button + link）
     button_texts = [
-        "Allow access",  # Allow access 页面
-        "Confirm and continue",  # Authorization requested 页面
-        "Allow", 
-        "Confirm", 
-        "允许", 
-        "确认", 
+        "Allow access",
+        "Allow Access",
+        "Allow",
+        "Allow device access",
+        "Confirm and continue",
+        "Confirm & continue",
+        "Confirm",
         "Authorize",
+        "Authorize device",
         "Continue",
-        "Accept"
+        "Accept",
+        "允许",
+        "授权",
+        "确认",
+        "继续",
+        "同意",
     ]
     
     for text in button_texts:
-        try:
-            button = page.get_by_role("button", name=text)
-            if button.is_visible(timeout=2000):
-                # 移动鼠标到按钮
-                try:
-                    box = button.bounding_box()
-                    if box:
-                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
-                except:
-                    pass
-                random_delay(500, 1000)
-                button.click()
-                print(f"[+] 已点击授权按钮: {text}")
-                return True
-        except Exception:
-            continue
+        if click_by_role("button", text):
+            return True
+        if click_by_role("link", text):
+            return True
     
-    # 方法3: 查找包含特定文字的按钮
+    # 方法3: 通过通用 CSS 选择器查找
+    css_selectors = [
+        'button[type="submit"]',
+        'button.awsui-button-variant-primary',
+        '[role="button"][data-testid*="allow"]',
+        '[role="button"][aria-label*="Allow"]',
+        '[data-testid*="allow"]',
+        'input[type="submit"]',
+        'button:has-text("Continue")',
+        'button:has-text("Next")',
+    ]
+    
+    for selector in css_selectors:
+        if click_by_selector(selector):
+            return True
+    
+    # 方法4: 查找所有按钮/伪按钮，匹配包含授权关键词的元素
+    allow_keywords = ['allow', 'allow access', 'authorize', 'confirm', 'continue', 'accept', '允许', '授权', '确认', '继续', '同意']
+    skip_keywords = ['cancel', 'close', 'back', 'deny', 'reject', 'decline', '取消', '关闭', '返回', '拒绝']
+    
     try:
-        buttons = page.locator('button').all()
-        for btn in buttons:
-            try:
-                if btn.is_visible(timeout=500):
-                    text = btn.text_content() or ""
-                    # 查找确认类按钮
-                    if any(kw in text.lower() for kw in ['confirm', 'allow', 'accept', 'continue']):
-                        # 跳过取消/拒绝按钮
-                        if any(skip in text.lower() for skip in ['cancel', 'deny', 'reject']):
+        frames = get_all_frames(page)
+        for frame in frames:
+            locator_groups = [
+                frame.locator('button'),
+                frame.locator('[role="button"]'),
+                frame.locator('input[type="submit"]'),
+            ]
+            
+            for group in locator_groups:
+                try:
+                    elements = group.all()
+                except Exception:
+                    continue
+                
+                for element in elements:
+                    try:
+                        if not locator_is_visible(element):
                             continue
-                        try:
-                            box = btn.bounding_box()
-                            if box:
-                                human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
-                        except:
-                            pass
-                        random_delay(500, 1000)
-                        btn.click()
-                        print(f"[+] 已点击授权按钮 (text match): {text[:30]}")
-                        return True
-            except:
-                continue
+                        
+                        text = (element.text_content() or "").strip()
+                        value_attr = (element.get_attribute("value") or "").strip()
+                        aria_label = (element.get_attribute("aria-label") or "").strip()
+                        combined_text = " ".join(part for part in [text, value_attr, aria_label] if part)
+                        
+                        if not combined_text:
+                            continue
+                        
+                        lower_text = combined_text.lower()
+                        if any(skip in lower_text for skip in skip_keywords):
+                            continue
+                        
+                        if any(keyword in lower_text for keyword in allow_keywords):
+                            if human_like_click(page, element, f"授权按钮 {combined_text[:30]}"):
+                                print(f"[+] 已点击授权按钮: {combined_text[:30]}")
+                                return True
+                    except Exception:
+                        continue
     except Exception as e:
         print(f"[!] 查找授权按钮时出错: {e}")
     
     return False
 
 
-def complete_authorization_flow(page: Page, max_attempts: int = 5) -> bool:
+def complete_authorization_flow(page: Page, max_attempts: int = 10) -> bool:
     """
     完成完整的授权流程（可能包含多个授权页面）
     
@@ -1106,33 +1250,64 @@ def complete_authorization_flow(page: Page, max_attempts: int = 5) -> bool:
     print("[*] 开始完成授权流程...")
     
     for attempt in range(max_attempts):
-        # 检查是否已经到达成功页面
-        current_url = page.url
-        if is_success_page(current_url):
-            print(f"[+] 授权成功！当前 URL: {current_url}")
+        # 检查是否已经到达成功页面（综合检查 URL 和页面内容）
+        if check_success_page(page):
+            print(f"[+] 授权成功！当前 URL: {page.url}")
             return True
         
+        current_url = page.url
         print(f"[*] 授权尝试 {attempt + 1}/{max_attempts}，当前 URL: {current_url[:80]}...")
         
-        # 等待页面加载
-        wait_for_page_ready(page, 10000)
-        random_delay(1000, 2000)
+        # 等待页面加载（增加等待时间）
+        wait_for_page_ready(page, 15000)
+        random_delay(3000, 5000)
+        
+        # 再次检查是否成功（页面加载完成后）
+        if check_success_page(page):
+            print(f"[+] 授权成功！当前 URL: {page.url}")
+            return True
+        
+        # 检查并关闭 Cookie 弹窗（可能会挡住授权按钮）
+        handle_cookie_consent(page)
+        random_delay(2000, 3000)
         
         # 尝试点击授权按钮
         if click_allow_button(page):
             print(f"[+] 第 {attempt + 1} 次点击授权按钮成功")
-            # 等待页面跳转
-            random_delay(2000, 4000)
-            wait_for_page_ready(page, 10000)
+            
+            # 等待页面跳转到成功页面（多次检测）
+            url_before = page.url
+            for wait_attempt in range(10):  # 最多等待 30 秒
+                random_delay(2000, 3000)
+                wait_for_page_ready(page, 5000)
+                
+                current_url = page.url
+                print(f"[*] 等待跳转 ({wait_attempt + 1}/10)，当前 URL: {current_url[:60]}...")
+                
+                # 检查是否到达成功页面（综合检查 URL 和页面内容）
+                if check_success_page(page):
+                    print(f"[+] 授权成功！当前 URL: {current_url}")
+                    return True
+                
+                # 如果在等待过程中出现新的授权页面，立即点击
+                if click_allow_button(page):
+                    print("[+] 等待跳转时检测到新的授权页面，已再次点击")
+                    url_before = page.url
+                    continue
+                
+                # 如果 URL 变化了但还不是成功页面，继续等待
+                if current_url != url_before:
+                    url_before = current_url
+                    continue
+            
         else:
             print(f"[!] 第 {attempt + 1} 次未找到授权按钮")
-            # 可能已经在成功页面或其他页面
-            random_delay(1000, 2000)
+            # 可能页面还在加载，等待更长时间
+            random_delay(5000, 8000)
         
-        # 再次检查是否成功
-        current_url = page.url
-        if is_success_page(current_url):
-            print(f"[+] 授权成功！当前 URL: {current_url}")
+        # 再次检查是否成功（综合检查）
+        if check_success_page(page):
+            print(f"[+] 授权成功！当前 URL: {page.url}")
             return True
     
     print(f"[!] 授权流程在 {max_attempts} 次尝试后仍未完成")
@@ -1207,101 +1382,122 @@ def handle_cookie_consent(page: Page) -> bool:
     """
     print("[*] 检查是否存在 Cookie 同意弹窗...")
     
-    # 先检查弹窗容器是否存在
-    try:
-        cookie_banner = page.locator('#awsccc-cb-c, #awsccc-sb-ux-c, [data-id="awsccc-cb"]').first
-        if not cookie_banner.is_visible(timeout=3000):
-            print("[*] 未发现 Cookie 弹窗")
-            return False
-        print("[*] 检测到 Cookie 弹窗容器")
-    except Exception as e:
-        print(f"[*] Cookie 弹窗检测: {e}")
-        # 继续尝试查找按钮
-    
     # AWS Cookie 同意弹窗的 Accept 按钮选择器
+    # HTML 结构:
+    # <div id="awsccc-sb-ux-c">
+    #   <div data-id="awsccc-cb" style="display: block;">  <-- 实际弹窗容器
+    #     <div id="awsccc-cb-c" ...>
+    #       <div id="awsccc-cb-buttons">
+    #         <button data-id="awsccc-cb-btn-accept" aria-label="Accept all cookies" class="awsccc-u-btn awsccc-u-btn-primary">
+    #           <span>Accept</span>
+    #         </button>
     cookie_selectors = [
-        'button[data-id="awsccc-cb-btn-accept"]',  # AWS 标准 Accept 按钮
-        '[data-id="awsccc-cb-btn-accept"]',  # 不限定标签
-        'button[aria-label="Accept all cookies"]',
+        'button[data-id="awsccc-cb-btn-accept"]',  # AWS 标准 Accept 按钮（精确匹配）
         '#awsccc-cb-buttons button.awsccc-u-btn-primary',  # 按钮容器内的主按钮
-        '#awsccc-cb-actions button:first-child',  # actions 区域的第一个按钮
+        'button[aria-label="Accept all cookies"]',  # 通过 aria-label 匹配
+        '[data-id="awsccc-cb"] button.awsccc-u-btn-primary',  # 弹窗容器内的主按钮
     ]
     
     for selector in cookie_selectors:
         try:
-            print(f"[DEBUG] 尝试选择器: {selector}")
             btn = page.locator(selector).first
             
             # 检查元素数量
             count = page.locator(selector).count()
-            print(f"[DEBUG] 找到 {count} 个匹配元素")
+            if count == 0:
+                continue
             
-            if count > 0:
-                # 尝试获取可见性
+            # 检查元素是否可见（增加超时时间）
+            try:
+                is_visible = btn.is_visible(timeout=2000)
+            except:
+                is_visible = False
+            
+            if not is_visible:
+                # 即使 is_visible 返回 false，也尝试检查元素是否存在于 DOM 中
+                # 因为某些情况下 Playwright 的可见性判断可能不准确
                 try:
-                    is_vis = btn.is_visible(timeout=1000)
-                    print(f"[DEBUG] 元素可见性: {is_vis}")
-                except Exception as ve:
-                    print(f"[DEBUG] 检查可见性失败: {ve}")
-                    is_vis = False
-                
-                if is_vis or count > 0:
-                    print(f"[*] 发现 Cookie Accept 按钮，尝试点击...")
-                    
-                    # 尝试滚动到元素
-                    try:
-                        btn.scroll_into_view_if_needed(timeout=2000)
-                        random_delay(300, 500)
-                    except:
-                        pass
-                    
-                    # 获取按钮位置并点击
-                    try:
-                        box = btn.bounding_box()
-                        if box:
-                            print(f"[DEBUG] 按钮位置: x={box['x']}, y={box['y']}, w={box['width']}, h={box['height']}")
-                            # 移动鼠标到按钮中心
-                            human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
-                            random_delay(200, 400)
-                    except Exception as be:
-                        print(f"[DEBUG] 获取按钮位置失败: {be}")
-                    
-                    # 点击按钮
-                    random_delay(300, 600)
-                    try:
-                        btn.click(force=True, timeout=5000)
-                        print("[+] 已点击 Cookie Accept 按钮")
-                    except Exception as ce:
-                        print(f"[!] 普通点击失败: {ce}, 尝试 JavaScript 点击...")
-                        try:
-                            btn.evaluate("el => el.click()")
-                            print("[+] 已通过 JavaScript 点击 Cookie Accept 按钮")
-                        except Exception as je:
-                            print(f"[!] JavaScript 点击也失败: {je}")
-                            continue
-                    
-                    # 等待弹窗消失
-                    random_delay(500, 1000)
-                    try:
-                        page.wait_for_selector('#awsccc-cb-c', state='hidden', timeout=3000)
-                        print("[+] Cookie 弹窗已关闭")
-                    except:
-                        print("[*] Cookie 弹窗可能已关闭（超时）")
-                    
-                    return True
+                    box = btn.bounding_box()
+                    if box and box['width'] > 0 and box['height'] > 0:
+                        is_visible = True
+                        print(f"[*] 按钮存在但 is_visible=false，通过 bounding_box 确认可见")
+                except:
+                    continue
+            
+            if not is_visible:
+                continue
+            
+            print(f"[*] 发现 Cookie Accept 按钮: {selector}")
+            
+            if not human_like_click(page, btn, "Cookie Accept 按钮"):
+                print("[!] Cookie Accept 按钮点击失败")
+                continue
+            
+            print("[+] 已点击 Cookie Accept 按钮")
+            
+            # 等待弹窗消失
+            random_delay(500, 1000)
+            try:
+                page.wait_for_selector('[data-id="awsccc-cb"]', state='hidden', timeout=3000)
+                print("[+] Cookie 弹窗已关闭")
+            except:
+                print("[*] Cookie 弹窗可能已关闭（超时）")
+            
+            return True
                     
         except Exception as e:
-            print(f"[DEBUG] 选择器 {selector} 失败: {e}")
             continue
     
-    print("[!] 未能找到或点击 Cookie Accept 按钮")
+    print("[*] 未发现 Cookie 弹窗或按钮")
     return False
 
 
-def is_success_page(url: str) -> bool:
-    """检查是否到达成功页面"""
-    success_indicators = ["device/success", "device/complete", "device/done", "success"]
-    return any(x in url for x in success_indicators)
+def check_success_page(page: Page) -> bool:
+    """
+    检查是否到达成功页面（只通过页面内容判断，不检查 URL）
+    
+    AWS 授权成功页面特征：
+    1. 页面显示 "Request approved"
+    2. 页面显示 "You can close this window"
+    3. 存在 data-testid="consent-success-component" 元素
+    4. 存在 data-analytics-alert="success" 成功提示框
+    
+    注意：不能通过 URL 判断，因为 /device?user_code= 页面可能还需要点击 Allow access
+    """
+    # 检查页面内容是否包含成功指示符
+    try:
+        # 方法1: 检查成功组件是否存在（最可靠）
+        success_component = page.locator('[data-testid="consent-success-component"]')
+        if success_component.count() > 0 and success_component.first.is_visible(timeout=1000):
+            print("[*] 检测到成功组件 (consent-success-component)")
+            return True
+    except:
+        pass
+    
+    try:
+        # 方法2: 检查成功提示框
+        success_alert = page.locator('[data-analytics-alert="success"]')
+        if success_alert.count() > 0 and success_alert.first.is_visible(timeout=1000):
+            print("[*] 检测到成功提示框")
+            return True
+    except:
+        pass
+    
+    try:
+        # 方法3: 检查页面文本内容
+        page_content = page.content().lower()
+        success_texts = [
+            "request approved",
+            "you can close this window",
+        ]
+        # 需要同时包含这两个文本才算成功（更严格）
+        if all(text in page_content for text in success_texts):
+            print("[*] 检测到成功文本内容")
+            return True
+    except:
+        pass
+    
+    return False
 
 
 # ==================== 主流程函数 ====================
@@ -1592,9 +1788,27 @@ def register_with_camoufox(
             random_delay(3000, 5000)
             
             # 7. 检查是否需要设置密码（AWS 流程：邮箱→姓名→验证码→密码）
-            password_inputs = page.locator('input[type="password"]').all()
-            if len(password_inputs) > 0:
-                print("[*] 检测到密码设置页面...")
+            # 多次尝试检测密码输入框（页面可能加载较慢）
+            print("[*] 检查是否需要设置密码...")
+            password_found = False
+            for pwd_attempt in range(5):
+                print(f"[*] 检测密码输入框 ({pwd_attempt + 1}/5)...")
+                try:
+                    # 等待密码输入框出现
+                    password_input = page.locator('input[type="password"]').first
+                    if password_input.is_visible(timeout=5000):
+                        password_found = True
+                        print("[*] 检测到密码设置页面...")
+                        break
+                except:
+                    pass
+                
+                # 等待后重试
+                if pwd_attempt < 4:
+                    random_delay(3000, 5000)
+                    wait_for_page_ready(page, 10000)
+            
+            if password_found:
                 if not fill_password_step(page, password):
                     try:
                         page.screenshot(path="debug_password_failed.png")
@@ -1605,10 +1819,13 @@ def register_with_camoufox(
                 
                 wait_for_page_ready(page, 15000)
                 random_delay(3000, 5000)
+            else:
+                print("[!] 未检测到密码输入框，可能页面结构不同")
             
             # 8. 完成完整的授权流程（可能包含多个授权页面）
             # 流程：Authorization requested → Allow access → 成功页面
-            if complete_authorization_flow(page, max_attempts=5):
+            # 注册流程较慢，增加尝试次数
+            if complete_authorization_flow(page, max_attempts=15):
                 return LoginResult(True, "注册并授权成功", email=email, password=password)
             
             final_url = page.url

@@ -9,7 +9,8 @@ import { AWSCredentials } from "../types/index.js";
 const DEFAULT_REGISTER_URL = "https://profile.aws.dev/register";
 
 export interface RegisterAccountOptions extends GenerateEmailOptions, MailWaitOptions {
-    password: string;
+    /** 密码（可选，未提供时由 Camoufox 自动生成） */
+    password?: string;
     fullName?: string;
     registerUrl?: string;
 }

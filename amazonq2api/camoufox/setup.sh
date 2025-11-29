@@ -35,7 +35,44 @@ pip install -r "$SCRIPT_DIR/requirements.txt"
 
 # 安装 Camoufox 浏览器
 echo "🦊 下载 Camoufox 浏览器..."
-python -c "from camoufox.sync_api import Camoufox; print('Camoufox 已就绪')"
+python -c "from camoufox.sync_api import Camoufox; print('Camoufox 核心已就绪')"
+
+# 下载并验证扩展（解决空目录问题）
+echo "🧩 下载默认扩展 (uBlock Origin)..."
+python -c "
+import os
+import shutil
+from camoufox.addons import get_addon_path, maybe_download_addons, DefaultAddons
+
+# 检查 UBO 扩展
+addon_path = get_addon_path('UBO')
+manifest_path = os.path.join(addon_path, 'manifest.json')
+
+# 如果目录存在但 manifest.json 不存在，删除并重新下载
+if os.path.exists(addon_path) and not os.path.exists(manifest_path):
+    print(f'发现损坏的扩展目录，重新下载...')
+    shutil.rmtree(addon_path)
+
+# 下载扩展
+addon_list = []
+maybe_download_addons([DefaultAddons.UBO], addon_list)
+
+# 验证
+if os.path.exists(manifest_path):
+    print('扩展下载验证成功 ✓')
+else:
+    print('警告: 扩展下载可能失败')
+"
+
+# 最终验证
+echo "🔍 验证安装..."
+python -c "
+from camoufox.sync_api import Camoufox
+with Camoufox(headless=True) as browser:
+    page = browser.new_page()
+    page.goto('about:blank')
+print('Camoufox 验证通过 ✓')
+"
 
 echo ""
 echo "✅ 安装完成！"
