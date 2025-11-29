@@ -1,0 +1,27 @@
+{
+    "name": "amazonq-ts-auto-login",
+    "version": "1.0.0",
+    "description": "全自动 Amazon Q OIDC 设备授权与登录流程 (TypeScript)",
+    "type": "module",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "start": "tsx src/index.ts",
+        "lint": "tsc -p tsconfig.json --noEmit"
+    },
+    "dependencies": {
+        "dotenv": "^16.3.0",
+        "fs-extra": "^11.2.0",
+        "otplib": "^12.0.1",
+        "playwright": "^1.40.0",
+        "undici": "^6.0.0",
+        "uuid": "^9.0.0"
+    },
+    "devDependencies": {
+        "@types/fs-extra": "^11.0.4",
+        "@types/node": "^20.0.0",
+        "@types/uuid": "^9.0.0",
+        "tsx": "^4.0.0",
+        "typescript": "^5.3.0"
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "proxy": "",
+    "image_base_url": "http://127.0.0.1:8000/",
+    "accounts": [
+        {
+            "team_id": "xxx",
+            "secure_c_ses": "CSE....",
+            "host_c_oses": "COS....",
+            "csesidx": "xxxx",
+            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+            "available": false
+        }
+    ],
+    "models": [
+        {
+            "id": "gemini-enterprise2",
+            "name": "Gemini Enterprise",
+            "description": "Google Gemini Enterprise 模型",
+            "context_length": 32768,
+            "max_tokens": 8192,
+            "price_per_1k_tokens": 0.0015
+        }
+    ]
+}

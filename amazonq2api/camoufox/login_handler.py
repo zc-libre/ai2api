@@ -1,0 +1,1713 @@
+#!/usr/bin/env python3
+"""
+使用 Camoufox 反检测浏览器完成 Amazon 设备授权登录/注册。
+Camoufox 在 C++ 内核层修改指纹，比 JS 注入更难被检测。
+"""
+import os
+import sys
+import json
+import time
+import random
+import argparse
+import re
+import requests
+from typing import Optional, Tuple
+from dataclasses import dataclass, asdict
+
+from camoufox.sync_api import Camoufox
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
+
+# 尝试导入 pyotp（用于 MFA）
+try:
+    import pyotp
+    HAS_PYOTP = True
+except ImportError:
+    HAS_PYOTP = False
+
+
+@dataclass
+class Credentials:
+    email: str
+    password: str
+    mfa_secret: Optional[str] = None
+
+
+@dataclass
+class RegistrationOptions:
+    """注册选项"""
+    gptmail_base_url: str
+    gptmail_api_key: str
+    password: Optional[str] = None  # 可选，未提供时自动生成符合要求的密码
+    email_prefix: Optional[str] = None
+    email_domain: Optional[str] = None
+    full_name: Optional[str] = None
+
+
+@dataclass
+class LoginResult:
+    success: bool
+    message: str
+    error_code: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+
+def random_delay(min_ms: int = 500, max_ms: int = 2000) -> None:
+    """模拟人类操作的随机延迟"""
+    time.sleep(random.randint(min_ms, max_ms) / 1000)
+
+
+def center_browser_window(page: Page, width: int = 1280, height: int = 800) -> None:
+    """
+    将浏览器窗口居中显示
+    """
+    try:
+        # 设置视口大小
+        page.set_viewport_size({"width": width, "height": height})
+        
+        # 尝试使用 JavaScript 获取屏幕信息并居中窗口
+        # 注意：某些浏览器可能限制 window.moveTo
+        page.evaluate("""
+            () => {
+                const screenWidth = window.screen.availWidth || 1920;
+                const screenHeight = window.screen.availHeight || 1080;
+                const windowWidth = window.outerWidth || 1280;
+                const windowHeight = window.outerHeight || 800;
+                const left = Math.max(0, (screenWidth - windowWidth) / 2);
+                const top = Math.max(0, (screenHeight - windowHeight) / 2);
+                try {
+                    window.moveTo(left, top);
+                } catch (e) {
+                    // 某些浏览器不支持 moveTo
+                }
+            }
+        """)
+        print(f"[*] 窗口大小设置为 {width}x{height}")
+    except Exception as e:
+        print(f"[!] 设置窗口位置失败: {e}")
+
+
+def human_mouse_move(page: Page, x: int, y: int) -> None:
+    """模拟人类鼠标移动（带有轻微抖动）"""
+    try:
+        # 获取当前鼠标位置（假设从随机位置开始）
+        current_x = random.randint(100, 500)
+        current_y = random.randint(100, 300)
+        
+        # 分步移动
+        steps = random.randint(5, 10)
+        for i in range(steps):
+            progress = (i + 1) / steps
+            # 添加轻微随机偏移
+            jitter_x = random.randint(-3, 3)
+            jitter_y = random.randint(-3, 3)
+            next_x = int(current_x + (x - current_x) * progress) + jitter_x
+            next_y = int(current_y + (y - current_y) * progress) + jitter_y
+            page.mouse.move(next_x, next_y)
+            time.sleep(random.uniform(0.01, 0.03))
+    except:
+        pass
+
+
+def simulate_human_behavior(page: Page) -> None:
+    """模拟人类浏览行为（滚动、移动鼠标等）"""
+    print("[*] 模拟人类浏览行为...")
+    
+    try:
+        # 1. 随机移动鼠标几次
+        for _ in range(random.randint(2, 4)):
+            x = random.randint(200, 800)
+            y = random.randint(200, 600)
+            human_mouse_move(page, x, y)
+            random_delay(200, 500)
+        
+        # 2. 轻微滚动页面
+        scroll_amount = random.randint(50, 150)
+        page.mouse.wheel(0, scroll_amount)
+        random_delay(500, 1000)
+        
+        # 滚动回去
+        page.mouse.wheel(0, -scroll_amount // 2)
+        random_delay(300, 600)
+        
+        # 3. 再移动一下鼠标
+        human_mouse_move(page, random.randint(300, 600), random.randint(300, 500))
+        random_delay(500, 1000)
+        
+    except Exception as e:
+        print(f"[!] 模拟行为时出错: {e}")
+
+
+def human_type(page: Page, selector: str, text: str) -> None:
+    """模拟人类打字速度（更慢更自然）"""
+    element = page.locator(selector).first
+    
+    # 先移动鼠标到元素附近
+    try:
+        box = element.bounding_box()
+        if box:
+            target_x = int(box['x'] + box['width'] / 2 + random.randint(-10, 10))
+            target_y = int(box['y'] + box['height'] / 2 + random.randint(-5, 5))
+            human_mouse_move(page, target_x, target_y)
+    except:
+        pass
+    
+    random_delay(300, 600)
+    element.click()
+    random_delay(400, 800)
+    
+    for char in text:
+        # 更慢的打字速度（100-250ms 每个字符）
+        element.type(char, delay=random.randint(100, 250))
+        # 更频繁的停顿（20% 概率）
+        if random.random() < 0.2:
+            random_delay(200, 500)
+        # 偶尔更长的停顿（5% 概率，模拟思考）
+        if random.random() < 0.05:
+            random_delay(500, 1000)
+
+
+def generate_display_name() -> str:
+    """生成随机显示名称"""
+    first_names = ["Alex", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Quinn", "Avery"]
+    last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis"]
+    return f"{random.choice(first_names)} {random.choice(last_names)}"
+
+
+def generate_secure_password(length: int = 12) -> str:
+    """
+    生成符合 AWS 要求的安全密码
+    要求：大写字母 + 小写字母 + 数字 + 特殊字符，长度 > 8
+    """
+    import string
+    
+    if length < 9:
+        length = 12  # 确保长度大于 8
+    
+    # 定义字符集
+    uppercase = string.ascii_uppercase  # A-Z
+    lowercase = string.ascii_lowercase  # a-z
+    digits = string.digits              # 0-9
+    # AWS 允许的特殊字符（避免可能引起问题的字符）
+    special = "!@#$%^&*()-_=+"
+    
+    # 确保每种类型至少有一个
+    password = [
+        random.choice(uppercase),
+        random.choice(lowercase),
+        random.choice(digits),
+        random.choice(special),
+    ]
+    
+    # 填充剩余长度
+    all_chars = uppercase + lowercase + digits + special
+    password.extend(random.choice(all_chars) for _ in range(length - 4))
+    
+    # 打乱顺序
+    random.shuffle(password)
+    
+    return ''.join(password)
+
+
+def validate_password(password: str) -> Tuple[bool, str]:
+    """
+    验证密码是否符合 AWS 要求
+    返回: (是否有效, 错误信息)
+    """
+    import string
+    
+    if len(password) <= 8:
+        return False, "密码长度必须大于 8 个字符"
+    
+    has_upper = any(c in string.ascii_uppercase for c in password)
+    has_lower = any(c in string.ascii_lowercase for c in password)
+    has_digit = any(c in string.digits for c in password)
+    has_special = any(c in "!@#$%^&*()-_=+[]{}|;:,.<>?" for c in password)
+    
+    if not has_upper:
+        return False, "密码必须包含大写字母"
+    if not has_lower:
+        return False, "密码必须包含小写字母"
+    if not has_digit:
+        return False, "密码必须包含数字"
+    if not has_special:
+        return False, "密码必须包含特殊字符"
+    
+    return True, "密码格式有效"
+
+
+# ==================== GPTMail 集成 ====================
+
+class GPTMailClient:
+    """GPTMail 临时邮箱客户端"""
+    
+    def __init__(self, base_url: str, api_key: str, proxy: Optional[str] = None):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.session = requests.Session()
+        # 使用 x-api-key header（与 TypeScript 版本一致）
+        self.session.headers["x-api-key"] = api_key
+        self.session.headers["Content-Type"] = "application/json"
+        self.session.headers["Accept"] = "application/json"
+        if proxy:
+            self.session.proxies = {"http": proxy, "https": proxy}
+    
+    def generate_email(self, prefix: Optional[str] = None, domain: Optional[str] = None) -> str:
+        """生成临时邮箱地址"""
+        # 使用正确的 API 端点: /api/generate-email
+        if prefix or domain:
+            # POST 请求带参数
+            payload = {}
+            if prefix:
+                payload["prefix"] = prefix
+            if domain:
+                payload["domain"] = domain
+            resp = self.session.post(f"{self.base_url}/api/generate-email", json=payload)
+        else:
+            # GET 请求
+            resp = self.session.get(f"{self.base_url}/api/generate-email")
+        
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # 处理响应格式: { success: true, data: { email: "..." } }
+        if data.get("success") and data.get("data"):
+            return data["data"].get("email")
+        # 兼容直接返回格式
+        return data.get("email") or data.get("address")
+    
+    def get_emails(self, email: str) -> list:
+        """获取邮件列表"""
+        resp = self.session.get(f"{self.base_url}/api/emails", params={"email": email})
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if data.get("success") and data.get("data"):
+            return data["data"].get("emails", [])
+        return data.get("emails", [])
+    
+    def get_email_detail(self, email_id: str) -> dict:
+        """获取邮件详情"""
+        resp = self.session.get(f"{self.base_url}/api/email/{email_id}")
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if data.get("success") and data.get("data"):
+            return data["data"]
+        return data
+    
+    def wait_for_verification_code(
+        self, 
+        email: str, 
+        timeout_ms: int = 120000,
+        poll_interval_ms: int = 3000
+    ) -> str:
+        """等待并获取验证码"""
+        start_time = time.time()
+        timeout_sec = timeout_ms / 1000
+        poll_interval_sec = poll_interval_ms / 1000
+        
+        print(f"[*] 等待验证邮件... (邮箱: {email}, 超时: {timeout_sec}s)")
+        
+        poll_count = 0
+        while time.time() - start_time < timeout_sec:
+            poll_count += 1
+            elapsed = int(time.time() - start_time)
+            print(f"[*] 轮询邮件 #{poll_count} (已等待 {elapsed}s)...")
+            
+            try:
+                emails = self.get_emails(email)
+                print(f"[*] 收到 {len(emails) if emails else 0} 封邮件")
+                
+                if emails and len(emails) > 0:
+                    for msg in emails:
+                        # 检查是否是 AWS 验证邮件
+                        subject = msg.get("subject", "")
+                        print(f"[*] 检查邮件: {subject[:50]}...")
+                        
+                        if "verification" in subject.lower() or "verify" in subject.lower() or "aws" in subject.lower() or "code" in subject.lower():
+                            # 获取邮件详情
+                            print(f"[*] 发现可能的验证邮件，获取详情...")
+                            detail = self.get_email_detail(msg.get("id"))
+                            
+                            # 打印邮件详情的所有字段（调试用）
+                            print(f"[DEBUG] 邮件字段: {list(detail.keys())}")
+                            
+                            # 尝试多种字段获取内容
+                            body = ""
+                            for field in ["body", "text", "html", "content", "textBody", "htmlBody", "plain", "rawBody"]:
+                                if detail.get(field):
+                                    body = detail.get(field)
+                                    print(f"[DEBUG] 使用字段 '{field}' 获取内容，长度: {len(body)}")
+                                    break
+                            
+                            if not body:
+                                print(f"[DEBUG] 完整邮件内容: {detail}")
+                            else:
+                                # 打印前 500 字符用于调试
+                                print(f"[DEBUG] 邮件内容预览: {body[:500]}...")
+                            
+                            # 提取 6 位验证码（多种模式）
+                            # 模式1: 独立的 6 位数字
+                            code_match = re.search(r'\b(\d{6})\b', body)
+                            if code_match:
+                                code = code_match.group(1)
+                                print(f"[+] 获取到验证码: {code}")
+                                return code
+                            
+                            # 模式2: 可能被 HTML 标签包裹
+                            code_match = re.search(r'>(\d{6})<', body)
+                            if code_match:
+                                code = code_match.group(1)
+                                print(f"[+] 获取到验证码 (HTML): {code}")
+                                return code
+                            
+                            # 模式3: "code is XXXXXX" 或 "code: XXXXXX"
+                            code_match = re.search(r'code[:\s]+(\d{6})', body, re.IGNORECASE)
+                            if code_match:
+                                code = code_match.group(1)
+                                print(f"[+] 获取到验证码 (code pattern): {code}")
+                                return code
+                            
+                            print(f"[!] 邮件中未找到 6 位验证码")
+                
+            except Exception as e:
+                print(f"[!] 获取邮件失败: {e}")
+            
+            print(f"[*] {poll_interval_sec}秒后重试...")
+            time.sleep(poll_interval_sec)
+        
+        raise TimeoutError(f"等待验证码超时 ({timeout_sec}s)")
+
+
+# ==================== 页面操作函数 ====================
+
+def find_and_fill_email(page: Page, email: str) -> bool:
+    """查找并填写邮箱输入框"""
+    # 优化选择器顺序，AWS Builder ID 页面使用 type="text" + placeholder 包含 @
+    selectors = [
+        # AWS Builder ID 特定选择器
+        'input[placeholder*="username@example.com"]',  # AWS Builder ID 登录页
+        'input[placeholder*="@"][type="text"]',  # 带邮箱占位符的文本框
+        'input[class*="awsui_input"]',  # AWS UI 输入框
+        # 通用选择器
+        'input[type="email"]',
+        'input[name="email"]',
+        '#resolving_input',
+        'input[placeholder*="@"]',
+        'input[type="text"][autocomplete="on"]',
+        'input[type="text"]'
+    ]
+    
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=3000):
+                print(f"[*] 找到邮箱输入框: {selector}")
+                # 移动到元素附近
+                try:
+                    box = locator.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                
+                random_delay(500, 1000)
+                human_type(page, selector, email)
+                random_delay(500, 1000)
+                
+                # 尝试点击 Continue 按钮而不是按 Enter（AWS 页面更可靠）
+                continue_clicked = False
+                continue_selectors = [
+                    'button[data-testid="test-primary-button"]',  # AWS Builder ID Continue 按钮
+                    'button[type="submit"]',
+                    'button:has-text("Continue")',
+                ]
+                for btn_selector in continue_selectors:
+                    try:
+                        btn = page.locator(btn_selector).first
+                        if btn.is_visible(timeout=1000):
+                            try:
+                                box = btn.bounding_box()
+                                if box:
+                                    human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                            except:
+                                pass
+                            random_delay(300, 600)
+                            btn.click()
+                            print(f"[+] 已点击 Continue 按钮")
+                            continue_clicked = True
+                            break
+                    except:
+                        continue
+                
+                # 如果没找到 Continue 按钮，按 Enter
+                if not continue_clicked:
+                    random_delay(300, 600)
+                    page.keyboard.press("Enter")
+                
+                print(f"[+] 已输入邮箱: {email}")
+                return True
+        except Exception as e:
+            print(f"[!] 选择器 {selector} 失败: {e}")
+            continue
+    
+    # 尝试使用 role
+    try:
+        textbox = page.get_by_role("textbox").first
+        if textbox.is_visible(timeout=3000):
+            print("[*] 使用 role=textbox 查找邮箱输入框")
+            # 移动鼠标到输入框
+            try:
+                box = textbox.bounding_box()
+                if box:
+                    human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+            except:
+                pass
+            
+            random_delay(500, 1000)
+            textbox.click()
+            random_delay(500, 1000)
+            
+            # 逐字符输入（更像人类）
+            for char in email:
+                textbox.type(char, delay=random.randint(80, 200))
+                if random.random() < 0.15:
+                    random_delay(100, 300)
+            
+            random_delay(500, 1000)
+            
+            # 尝试点击 Continue 按钮
+            try:
+                continue_btn = page.locator('button[data-testid="test-primary-button"]').first
+                if continue_btn.is_visible(timeout=1000):
+                    continue_btn.click()
+                    print(f"[+] 已输入邮箱并点击 Continue (role)")
+                    return True
+            except:
+                pass
+            
+            page.keyboard.press("Enter")
+            print(f"[+] 已输入邮箱 (role): {email}")
+            return True
+    except Exception:
+        pass
+    
+    return False
+
+
+def find_and_fill_password(page: Page, password: str) -> bool:
+    """查找并填写密码输入框"""
+    selectors = [
+        'input[type="password"]',
+        'input[name="password"]',
+        '#password'
+    ]
+    
+    # 等待密码框出现
+    random_delay(1000, 2000)
+    
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=5000):
+                random_delay(300, 800)
+                human_type(page, selector, password)
+                random_delay(200, 500)
+                page.keyboard.press("Enter")
+                print("[+] 已输入密码")
+                return True
+        except Exception:
+            continue
+    
+    return False
+
+
+def find_and_fill_mfa(page: Page, mfa_secret: str) -> bool:
+    """查找并填写 MFA 验证码"""
+    if not HAS_PYOTP:
+        print("[!] 未安装 pyotp，跳过 MFA")
+        return False
+    
+    selectors = [
+        'input[name="mfaCode"]',
+        'input[name="otp"]',
+        'input[type="tel"]',
+        'input[placeholder*="6"]'
+    ]
+    
+    random_delay(1000, 2000)
+    
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=5000):
+                totp = pyotp.TOTP(mfa_secret)
+                code = totp.now()
+                
+                random_delay(300, 800)
+                human_type(page, selector, code)
+                random_delay(200, 500)
+                page.keyboard.press("Enter")
+                print(f"[+] 已输入 MFA 验证码")
+                return True
+        except Exception:
+            continue
+    
+    return False
+
+
+def detect_registration_page(page: Page) -> bool:
+    """检测是否进入了注册页面"""
+    url = page.url
+    if "signup" in url or "register" in url:
+        return True
+    
+    # 检查是否有姓名输入框
+    name_selectors = [
+        'input[placeholder*="Maria"]',
+        'input[placeholder*="name" i]',
+        'input[name="fullName"]',
+        'input[name="displayName"]'
+    ]
+    
+    for selector in name_selectors:
+        try:
+            if page.locator(selector).first.is_visible(timeout=1000):
+                return True
+        except:
+            pass
+    
+    return False
+
+
+def fill_name_step(page: Page, display_name: str) -> bool:
+    """填写姓名步骤"""
+    print(f"[*] 填写姓名: {display_name}")
+    
+    name_selectors = [
+        'input[placeholder*="Maria"]',
+        'input[placeholder*="name" i]',
+        'input[name="fullName"]',
+        'input[name="displayName"]',
+        'input[autocomplete="name"]'
+    ]
+    
+    for selector in name_selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=3000):
+                # 模拟人类操作
+                try:
+                    box = locator.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                
+                random_delay(500, 1000)
+                locator.click()
+                random_delay(300, 600)
+                
+                # 逐字符输入
+                for char in display_name:
+                    locator.type(char, delay=random.randint(80, 180))
+                    if random.random() < 0.1:
+                        random_delay(100, 300)
+                
+                print(f"[+] 已填写姓名: {display_name}")
+                
+                # 点击继续
+                random_delay(1000, 2000)
+                if click_continue_button(page):
+                    print("[+] 姓名步骤完成")
+                else:
+                    print("[!] 未能点击继续按钮，尝试按 Enter")
+                    page.keyboard.press("Enter")
+                    random_delay(500, 1000)
+                return True
+        except Exception as e:
+            print(f"[!] 填写姓名时出错: {e}")
+            continue
+    
+    print("[!] 未找到姓名输入框")
+    return False
+
+
+def print_page_structure(page: Page) -> None:
+    """打印页面结构用于调试"""
+    print("[DEBUG] ========== 页面结构分析 ==========")
+    print(f"[DEBUG] 当前 URL: {page.url}")
+    
+    # 打印所有输入框
+    try:
+        inputs = page.locator('input').all()
+        print(f"[DEBUG] 找到 {len(inputs)} 个输入框:")
+        for i, inp in enumerate(inputs):
+            try:
+                input_type = inp.get_attribute('type') or 'text'
+                input_name = inp.get_attribute('name') or ''
+                input_id = inp.get_attribute('id') or ''
+                placeholder = inp.get_attribute('placeholder') or ''
+                testid = inp.get_attribute('data-testid') or ''
+                visible = inp.is_visible()
+                print(f"[DEBUG]   [{i}] type={input_type}, name={input_name}, id={input_id}, placeholder={placeholder[:30]}, data-testid={testid}, visible={visible}")
+            except:
+                pass
+    except Exception as e:
+        print(f"[DEBUG] 获取输入框失败: {e}")
+    
+    # 打印所有按钮
+    try:
+        buttons = page.locator('button').all()
+        print(f"[DEBUG] 找到 {len(buttons)} 个按钮:")
+        for i, btn in enumerate(buttons):
+            try:
+                text = (btn.text_content() or '')[:30]
+                testid = btn.get_attribute('data-testid') or ''
+                btn_type = btn.get_attribute('type') or ''
+                visible = btn.is_visible()
+                print(f"[DEBUG]   [{i}] text={text}, type={btn_type}, data-testid={testid}, visible={visible}")
+            except:
+                pass
+    except Exception as e:
+        print(f"[DEBUG] 获取按钮失败: {e}")
+    
+    print("[DEBUG] ========== 结构分析完成 ==========")
+
+
+def fill_password_step(page: Page, password: str) -> bool:
+    """填写密码步骤"""
+    print("[*] 填写密码...")
+    
+    # 等待页面加载
+    wait_for_page_ready(page, 10000)
+    random_delay(2000, 3000)
+    
+    # 打印页面结构用于调试
+    print_page_structure(page)
+    
+    # 可能有两个密码框（密码 + 确认密码）
+    password_inputs = page.locator('input[type="password"]').all()
+    
+    if len(password_inputs) >= 2:
+        print(f"[*] 找到 {len(password_inputs)} 个密码框")
+        # 有确认密码框
+        try:
+            box = password_inputs[0].bounding_box()
+            if box:
+                human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+        except:
+            pass
+        
+        random_delay(500, 1000)
+        password_inputs[0].click()
+        random_delay(300, 600)
+        
+        # 逐字符输入密码
+        for char in password:
+            password_inputs[0].type(char, delay=random.randint(60, 150))
+        
+        random_delay(500, 1000)
+        
+        # 确认密码
+        try:
+            box = password_inputs[1].bounding_box()
+            if box:
+                human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+        except:
+            pass
+        
+        random_delay(300, 600)
+        password_inputs[1].click()
+        random_delay(300, 600)
+        
+        for char in password:
+            password_inputs[1].type(char, delay=random.randint(60, 150))
+        
+        print("[+] 已填写密码和确认密码")
+        
+    elif len(password_inputs) == 1:
+        try:
+            box = password_inputs[0].bounding_box()
+            if box:
+                human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+        except:
+            pass
+        
+        random_delay(500, 1000)
+        password_inputs[0].click()
+        random_delay(300, 600)
+        
+        for char in password:
+            password_inputs[0].type(char, delay=random.randint(60, 150))
+        
+        print("[+] 已填写密码")
+    else:
+        print("[!] 未找到密码输入框")
+        return False
+    
+    # 提交 - 先尝试点击继续按钮
+    random_delay(800, 1500)
+    print("[*] 尝试点击密码页面的继续按钮...")
+    
+    # 先尝试密码页面特定的按钮选择器
+    password_button_selectors = [
+        'button[data-testid="test-primary-button"]',  # 密码页面的继续按钮
+        'button[data-testid="password-creation-submit-button"]',
+        'button[data-testid="set-password-button"]',
+        'button[data-testid="create-password-button"]',
+        'button[data-testid*="primary-button"]',  # 匹配 primary-button 后缀
+    ]
+    
+    clicked = False
+    for selector in password_button_selectors:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1000):
+                try:
+                    box = btn.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                random_delay(300, 600)
+                btn.click()
+                print(f"[+] 已点击密码页面按钮: {selector}")
+                clicked = True
+                break
+        except:
+            continue
+    
+    # 如果特定选择器没找到，使用通用的 click_continue_button
+    if not clicked:
+        clicked = click_continue_button(page)
+    
+    # 如果还是没点击成功，尝试按 Enter
+    if not clicked:
+        print("[!] 未能点击继续按钮，尝试按 Enter 键...")
+        page.keyboard.press("Enter")
+        random_delay(500, 1000)
+    
+    return True
+
+
+def fill_registration_form(page: Page, display_name: str, password: str) -> bool:
+    """
+    填写注册表单
+    AWS 注册流程：邮箱 → 姓名 → 验证码 → 密码
+    这个函数只处理姓名步骤，密码在验证码之后填写
+    """
+    return fill_name_step(page, display_name)
+
+
+def fill_verification_code(page: Page, code: str) -> bool:
+    """填写验证码"""
+    print(f"[*] 填写验证码: {code}")
+    
+    code_selectors = [
+        'input[name="code"]',
+        'input[name="verificationCode"]',
+        'input[name="confirmationCode"]',
+        'input[placeholder*="6"]',
+        'input[placeholder*="code" i]',
+        'input[placeholder*="验证" i]',
+        'input[type="tel"]',
+        'input[maxlength="6"]',
+        'input[data-testid*="code"]',
+        'input[data-testid*="verification"]',
+    ]
+    
+    for selector in code_selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=3000):
+                # 移动鼠标到输入框
+                try:
+                    box = locator.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                
+                random_delay(500, 1000)
+                locator.click()
+                random_delay(300, 600)
+                
+                # 逐字符输入验证码
+                for char in code:
+                    locator.type(char, delay=random.randint(100, 200))
+                
+                print(f"[+] 已填写验证码: {code}")
+                
+                # 点击继续按钮
+                random_delay(1000, 2000)
+                if click_continue_button(page):
+                    print("[+] 验证码步骤完成")
+                else:
+                    print("[!] 未能点击继续按钮，尝试按 Enter")
+                    page.keyboard.press("Enter")
+                
+                return True
+        except Exception as e:
+            print(f"[!] 选择器 {selector} 失败: {e}")
+            continue
+    
+    # 尝试使用 role 查找
+    try:
+        textbox = page.get_by_role("textbox").first
+        if textbox.is_visible(timeout=3000):
+            print("[*] 使用 role=textbox 查找输入框")
+            textbox.click()
+            random_delay(300, 600)
+            for char in code:
+                textbox.type(char, delay=random.randint(100, 200))
+            print(f"[+] 已填写验证码 (role): {code}")
+            
+            random_delay(1000, 2000)
+            if click_continue_button(page):
+                print("[+] 验证码步骤完成")
+            else:
+                page.keyboard.press("Enter")
+            
+            return True
+    except:
+        pass
+    
+    print("[!] 未找到验证码输入框")
+    return False
+
+
+def click_continue_button(page: Page) -> bool:
+    """点击继续/下一步/提交按钮"""
+    print("[*] 查找继续按钮...")
+    
+    # 方法1: 通过 data-testid 查找（AWS 常用）
+    testid_selectors = [
+        'button[data-testid="email-verification-verify-button"]',  # 验证码页面的继续按钮
+        'button[data-testid="signup-next-button"]',
+        'button[data-testid="continue-button"]',
+        'button[data-testid="submit-button"]',
+        '[data-testid="signup-next-button"]',
+        '[data-testid*="verify-button"]',  # 匹配 verify-button 后缀
+        '[data-testid*="continue"]',
+        '[data-testid*="next"]',
+        '[data-testid*="submit"]',
+    ]
+    
+    for selector in testid_selectors:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1000):
+                # 移动鼠标到按钮
+                try:
+                    box = btn.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                random_delay(300, 600)
+                btn.click()
+                print(f"[+] 已点击按钮 (data-testid): {selector}")
+                return True
+        except:
+            continue
+    
+    # 方法2: 通过按钮文字查找
+    button_texts = ["Continue", "继续", "Next", "下一步", "Submit", "提交", "Verify", "验证", "Create"]
+    
+    for text in button_texts:
+        try:
+            button = page.get_by_role("button", name=text)
+            if button.is_visible(timeout=1000):
+                try:
+                    box = button.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                random_delay(300, 600)
+                button.click()
+                print(f"[+] 已点击按钮: {text}")
+                return True
+        except:
+            continue
+    
+    # 方法3: 通过 CSS 选择器查找
+    css_selectors = [
+        'button[type="submit"]',
+        'button.awsui-button-variant-primary',
+        'button.primary',
+        'button:has-text("Continue")',
+        'button:has-text("Next")',
+        'input[type="submit"]',
+    ]
+    
+    for selector in css_selectors:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=1000):
+                try:
+                    box = btn.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                random_delay(300, 600)
+                btn.click()
+                print(f"[+] 已点击按钮 (CSS): {selector}")
+                return True
+        except:
+            continue
+    
+    # 方法4: 查找所有按钮并点击第一个可见的主要按钮
+    try:
+        buttons = page.locator('button').all()
+        print(f"[*] 找到 {len(buttons)} 个按钮")
+        for btn in buttons:
+            try:
+                if btn.is_visible(timeout=500):
+                    text = btn.text_content() or ""
+                    # 跳过取消、关闭等按钮
+                    if any(skip in text.lower() for skip in ['cancel', 'close', 'back', '取消', '关闭', '返回']):
+                        continue
+                    print(f"[*] 尝试点击按钮: {text[:30]}...")
+                    try:
+                        box = btn.bounding_box()
+                        if box:
+                            human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                    except:
+                        pass
+                    random_delay(300, 600)
+                    btn.click()
+                    print(f"[+] 已点击按钮: {text[:30]}")
+                    return True
+            except:
+                continue
+    except Exception as e:
+        print(f"[!] 查找按钮时出错: {e}")
+    
+    print("[!] 未找到可点击的继续按钮")
+    return False
+
+
+def click_allow_button(page: Page) -> bool:
+    """点击授权允许按钮（包括 Authorization requested 和 Allow access 页面）"""
+    
+    random_delay(1000, 2000)
+    
+    # 方法1: 通过特定的 ID 或 data-analytics/data-testid 属性查找
+    specific_selectors = [
+        # Allow access 页面（数据访问授权）
+        'button[data-testid="allow-access-button"]',  # Allow access 按钮
+        'button[data-analytics="consent-allow-access"]',  # Allow access 按钮
+        # Authorization requested 页面（认证确认）
+        'button#cli_verification_btn',  # 认证确认按钮
+        'button[data-analytics="accept-user-code"]',  # 认证确认按钮
+        'button[data-testid="confirm-button"]',
+        'button[data-testid="allow-button"]',
+    ]
+    
+    for selector in specific_selectors:
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=2000):
+                # 移动鼠标到按钮
+                try:
+                    box = btn.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                random_delay(500, 1000)
+                btn.click()
+                print(f"[+] 已点击授权按钮 (selector): {selector}")
+                return True
+        except Exception:
+            continue
+    
+    # 方法2: 通过按钮文字查找
+    button_texts = [
+        "Allow access",  # Allow access 页面
+        "Confirm and continue",  # Authorization requested 页面
+        "Allow", 
+        "Confirm", 
+        "允许", 
+        "确认", 
+        "Authorize",
+        "Continue",
+        "Accept"
+    ]
+    
+    for text in button_texts:
+        try:
+            button = page.get_by_role("button", name=text)
+            if button.is_visible(timeout=2000):
+                # 移动鼠标到按钮
+                try:
+                    box = button.bounding_box()
+                    if box:
+                        human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                except:
+                    pass
+                random_delay(500, 1000)
+                button.click()
+                print(f"[+] 已点击授权按钮: {text}")
+                return True
+        except Exception:
+            continue
+    
+    # 方法3: 查找包含特定文字的按钮
+    try:
+        buttons = page.locator('button').all()
+        for btn in buttons:
+            try:
+                if btn.is_visible(timeout=500):
+                    text = btn.text_content() or ""
+                    # 查找确认类按钮
+                    if any(kw in text.lower() for kw in ['confirm', 'allow', 'accept', 'continue']):
+                        # 跳过取消/拒绝按钮
+                        if any(skip in text.lower() for skip in ['cancel', 'deny', 'reject']):
+                            continue
+                        try:
+                            box = btn.bounding_box()
+                            if box:
+                                human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                        except:
+                            pass
+                        random_delay(500, 1000)
+                        btn.click()
+                        print(f"[+] 已点击授权按钮 (text match): {text[:30]}")
+                        return True
+            except:
+                continue
+    except Exception as e:
+        print(f"[!] 查找授权按钮时出错: {e}")
+    
+    return False
+
+
+def complete_authorization_flow(page: Page, max_attempts: int = 5) -> bool:
+    """
+    完成完整的授权流程（可能包含多个授权页面）
+    
+    AWS 授权流程可能包含：
+    1. Authorization requested 页面 → "Confirm and continue"
+    2. Allow access 页面 → "Allow access"
+    3. 可能还有其他授权页面
+    
+    Args:
+        page: 页面对象
+        max_attempts: 最大尝试次数
+    
+    Returns:
+        是否成功到达成功页面
+    """
+    print("[*] 开始完成授权流程...")
+    
+    for attempt in range(max_attempts):
+        # 检查是否已经到达成功页面
+        current_url = page.url
+        if is_success_page(current_url):
+            print(f"[+] 授权成功！当前 URL: {current_url}")
+            return True
+        
+        print(f"[*] 授权尝试 {attempt + 1}/{max_attempts}，当前 URL: {current_url[:80]}...")
+        
+        # 等待页面加载
+        wait_for_page_ready(page, 10000)
+        random_delay(1000, 2000)
+        
+        # 尝试点击授权按钮
+        if click_allow_button(page):
+            print(f"[+] 第 {attempt + 1} 次点击授权按钮成功")
+            # 等待页面跳转
+            random_delay(2000, 4000)
+            wait_for_page_ready(page, 10000)
+        else:
+            print(f"[!] 第 {attempt + 1} 次未找到授权按钮")
+            # 可能已经在成功页面或其他页面
+            random_delay(1000, 2000)
+        
+        # 再次检查是否成功
+        current_url = page.url
+        if is_success_page(current_url):
+            print(f"[+] 授权成功！当前 URL: {current_url}")
+            return True
+    
+    print(f"[!] 授权流程在 {max_attempts} 次尝试后仍未完成")
+    return False
+
+
+def check_for_errors(page: Page, strict: bool = False) -> Optional[str]:
+    """
+    检查页面是否有错误信息
+    
+    Args:
+        page: 页面对象
+        strict: 是否严格模式（严格模式下检测更多关键词）
+    """
+    # 严重错误（总是检测）
+    critical_errors = [
+        ("BLOCKED", "TES"),
+        ("blocked", "request"),
+        ("access", "denied"),
+    ]
+    
+    # 轻微警告（只在严格模式下检测）
+    warnings = [
+        ("captcha", "verify"),
+        ("robot", "check"),
+        ("error", "occurred"),
+    ]
+    
+    page_text = page.content().lower()
+    
+    # 检查严重错误
+    for keywords in critical_errors:
+        if all(kw in page_text for kw in keywords):
+            return f"检测到严重错误: {keywords}"
+    
+    # 严格模式下检查警告
+    if strict:
+        for keywords in warnings:
+            if all(kw in page_text for kw in keywords):
+                return f"检测到警告: {keywords}"
+    
+    return None
+
+
+def check_for_captcha(page: Page) -> bool:
+    """检查是否出现了 CAPTCHA"""
+    captcha_indicators = [
+        "iframe[src*='captcha']",
+        "iframe[src*='recaptcha']",
+        "#captcha",
+        ".captcha",
+        "[data-callback*='captcha']"
+    ]
+    
+    for selector in captcha_indicators:
+        try:
+            if page.locator(selector).count() > 0:
+                return True
+        except:
+            pass
+    
+    return False
+
+
+def handle_cookie_consent(page: Page) -> bool:
+    """
+    处理 AWS Cookie 同意弹窗
+    如果存在 cookie 弹窗，点击 Accept 按钮
+    
+    Returns:
+        bool: 是否成功处理了 cookie 弹窗
+    """
+    print("[*] 检查是否存在 Cookie 同意弹窗...")
+    
+    # 先检查弹窗容器是否存在
+    try:
+        cookie_banner = page.locator('#awsccc-cb-c, #awsccc-sb-ux-c, [data-id="awsccc-cb"]').first
+        if not cookie_banner.is_visible(timeout=3000):
+            print("[*] 未发现 Cookie 弹窗")
+            return False
+        print("[*] 检测到 Cookie 弹窗容器")
+    except Exception as e:
+        print(f"[*] Cookie 弹窗检测: {e}")
+        # 继续尝试查找按钮
+    
+    # AWS Cookie 同意弹窗的 Accept 按钮选择器
+    cookie_selectors = [
+        'button[data-id="awsccc-cb-btn-accept"]',  # AWS 标准 Accept 按钮
+        '[data-id="awsccc-cb-btn-accept"]',  # 不限定标签
+        'button[aria-label="Accept all cookies"]',
+        '#awsccc-cb-buttons button.awsccc-u-btn-primary',  # 按钮容器内的主按钮
+        '#awsccc-cb-actions button:first-child',  # actions 区域的第一个按钮
+    ]
+    
+    for selector in cookie_selectors:
+        try:
+            print(f"[DEBUG] 尝试选择器: {selector}")
+            btn = page.locator(selector).first
+            
+            # 检查元素数量
+            count = page.locator(selector).count()
+            print(f"[DEBUG] 找到 {count} 个匹配元素")
+            
+            if count > 0:
+                # 尝试获取可见性
+                try:
+                    is_vis = btn.is_visible(timeout=1000)
+                    print(f"[DEBUG] 元素可见性: {is_vis}")
+                except Exception as ve:
+                    print(f"[DEBUG] 检查可见性失败: {ve}")
+                    is_vis = False
+                
+                if is_vis or count > 0:
+                    print(f"[*] 发现 Cookie Accept 按钮，尝试点击...")
+                    
+                    # 尝试滚动到元素
+                    try:
+                        btn.scroll_into_view_if_needed(timeout=2000)
+                        random_delay(300, 500)
+                    except:
+                        pass
+                    
+                    # 获取按钮位置并点击
+                    try:
+                        box = btn.bounding_box()
+                        if box:
+                            print(f"[DEBUG] 按钮位置: x={box['x']}, y={box['y']}, w={box['width']}, h={box['height']}")
+                            # 移动鼠标到按钮中心
+                            human_mouse_move(page, int(box['x'] + box['width']/2), int(box['y'] + box['height']/2))
+                            random_delay(200, 400)
+                    except Exception as be:
+                        print(f"[DEBUG] 获取按钮位置失败: {be}")
+                    
+                    # 点击按钮
+                    random_delay(300, 600)
+                    try:
+                        btn.click(force=True, timeout=5000)
+                        print("[+] 已点击 Cookie Accept 按钮")
+                    except Exception as ce:
+                        print(f"[!] 普通点击失败: {ce}, 尝试 JavaScript 点击...")
+                        try:
+                            btn.evaluate("el => el.click()")
+                            print("[+] 已通过 JavaScript 点击 Cookie Accept 按钮")
+                        except Exception as je:
+                            print(f"[!] JavaScript 点击也失败: {je}")
+                            continue
+                    
+                    # 等待弹窗消失
+                    random_delay(500, 1000)
+                    try:
+                        page.wait_for_selector('#awsccc-cb-c', state='hidden', timeout=3000)
+                        print("[+] Cookie 弹窗已关闭")
+                    except:
+                        print("[*] Cookie 弹窗可能已关闭（超时）")
+                    
+                    return True
+                    
+        except Exception as e:
+            print(f"[DEBUG] 选择器 {selector} 失败: {e}")
+            continue
+    
+    print("[!] 未能找到或点击 Cookie Accept 按钮")
+    return False
+
+
+def is_success_page(url: str) -> bool:
+    """检查是否到达成功页面"""
+    success_indicators = ["device/success", "device/complete", "device/done", "success"]
+    return any(x in url for x in success_indicators)
+
+
+# ==================== 主流程函数 ====================
+
+def login_with_camoufox(
+    verification_url: str,
+    credentials: Credentials,
+    headless: bool = False,
+    proxy: Optional[str] = None,
+    timeout_ms: int = 60000
+) -> LoginResult:
+    """
+    使用 Camoufox 完成 Amazon 设备授权登录。
+    """
+    print(f"[*] 启动 Camoufox 浏览器（登录模式）...")
+    print(f"[*] 验证链接: {verification_url}")
+    
+    config = {
+        "headless": headless,
+        "geoip": True,  # 启用地理位置伪装
+        "humanize": True,  # 启用人类化鼠标移动
+        "window": (1280, 800),  # 窗口大小（元组格式）
+        "locale": "en-US",  # 使用英文界面避免乱码
+    }
+    if proxy:
+        # 代理格式: http://user:pass@host:port 或 http://host:port
+        config["proxy"] = {"server": proxy}
+    
+    try:
+        with Camoufox(**config) as browser:
+            page = browser.new_page()
+            page.set_default_timeout(timeout_ms)
+            
+            print("[*] 正在打开验证链接...")
+            page.goto(verification_url, wait_until="domcontentloaded")
+            random_delay(2000, 4000)
+            
+            # 处理 Cookie 同意弹窗（如果存在）
+            handle_cookie_consent(page)
+            random_delay(500, 1000)
+            
+            error = check_for_errors(page, strict=False)
+            if error:
+                return LoginResult(False, f"页面加载后检测到错误: {error}", "BLOCKED")
+            
+            # 输入邮箱
+            print("[*] 正在输入邮箱...")
+            if not find_and_fill_email(page, credentials.email):
+                return LoginResult(False, "未找到邮箱输入框", "EMAIL_INPUT_NOT_FOUND")
+            
+            random_delay(2000, 4000)
+            
+            error = check_for_errors(page, strict=False)
+            if error:
+                return LoginResult(False, f"输入邮箱后检测到错误: {error}", "BLOCKED")
+            
+            # 输入密码
+            print("[*] 正在输入密码...")
+            if not find_and_fill_password(page, credentials.password):
+                return LoginResult(False, "未找到密码输入框", "PASSWORD_INPUT_NOT_FOUND")
+            
+            random_delay(2000, 4000)
+            
+            # MFA
+            if credentials.mfa_secret:
+                print("[*] 检查 MFA...")
+                find_and_fill_mfa(page, credentials.mfa_secret)
+                random_delay(2000, 4000)
+            
+            # 完成完整的授权流程（可能包含多个授权页面）
+            # 流程：Authorization requested → Allow access → 成功页面
+            if complete_authorization_flow(page, max_attempts=5):
+                return LoginResult(True, "授权成功", email=credentials.email, password=credentials.password)
+            
+            final_url = page.url
+            error = check_for_errors(page, strict=False)
+            if error:
+                return LoginResult(False, f"最终检查发现错误: {error}", "BLOCKED")
+            
+            return LoginResult(False, f"授权流程未完成，当前 URL: {final_url}", "INCOMPLETE")
+            
+    except Exception as e:
+        return LoginResult(False, f"发生异常: {str(e)}", "EXCEPTION")
+
+
+def wait_for_page_ready(page: Page, timeout: int = 30000) -> None:
+    """等待页面完全加载"""
+    try:
+        # 等待网络空闲
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except:
+        pass
+    
+    try:
+        # 等待 DOM 加载完成
+        page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except:
+        pass
+    
+    # 额外等待动态内容
+    random_delay(2000, 3000)
+
+
+def register_with_camoufox(
+    verification_url: str,
+    reg_options: RegistrationOptions,
+    headless: bool = False,
+    proxy: Optional[str] = None,
+    timeout_ms: int = 180000  # 增加到 3 分钟
+) -> LoginResult:
+    """
+    使用 Camoufox 完成 Amazon 设备授权注册。
+    """
+    print(f"[*] 启动 Camoufox 浏览器（注册模式）...")
+    print(f"[*] 验证链接: {verification_url}")
+    
+    # 初始化邮箱客户端
+    mail_client = GPTMailClient(
+        base_url=reg_options.gptmail_base_url,
+        api_key=reg_options.gptmail_api_key,
+        proxy=proxy
+    )
+    
+    # 生成邮箱
+    email = mail_client.generate_email(
+        prefix=reg_options.email_prefix,
+        domain=reg_options.email_domain
+    )
+    print(f"[+] 生成临时邮箱: {email}")
+    
+    # 处理密码：验证或自动生成
+    password = reg_options.password
+    if password:
+        # 验证用户提供的密码格式
+        is_valid, error_msg = validate_password(password)
+        if not is_valid:
+            print(f"[!] 密码格式不符合要求: {error_msg}")
+            print("[*] 自动生成符合要求的密码...")
+            password = generate_secure_password(12)
+            print(f"[+] 生成密码: {password}")
+    else:
+        # 未提供密码，自动生成
+        password = generate_secure_password(12)
+        print(f"[+] 自动生成密码: {password}")
+    
+    display_name = reg_options.full_name or generate_display_name()
+    
+    config = {
+        "headless": headless,
+        "geoip": True,  # 启用地理位置伪装
+        "humanize": True,  # 启用人类化鼠标移动
+        "window": (1280, 800),  # 窗口大小（元组格式）
+        "locale": "en-US",  # 使用英文界面避免乱码
+    }
+    if proxy:
+        # 代理格式: http://user:pass@host:port 或 http://host:port
+        config["proxy"] = {"server": proxy}
+    
+    try:
+        with Camoufox(**config) as browser:
+            page = browser.new_page()
+            page.set_default_timeout(timeout_ms)
+            
+            print("[*] 正在打开验证链接...")
+            page.goto(verification_url, wait_until="domcontentloaded")
+            
+            # 等待页面完全加载
+            print("[*] 等待页面加载...")
+            wait_for_page_ready(page, 30000)
+            random_delay(3000, 5000)  # 额外等待
+            
+            # 处理 Cookie 同意弹窗（如果存在）
+            handle_cookie_consent(page)
+            random_delay(500, 1000)
+            
+            # 检查是否有 CAPTCHA
+            if check_for_captcha(page):
+                print("[!] 检测到 CAPTCHA，尝试等待...")
+                random_delay(5000, 8000)
+            
+            error = check_for_errors(page, strict=False)  # 非严格模式
+            if error:
+                return LoginResult(False, f"页面加载后检测到错误: {error}", "BLOCKED")
+            
+            # 模拟人类浏览行为（重要！）
+            simulate_human_behavior(page)
+            random_delay(1000, 2000)
+            
+            # 1. 输入邮箱（增加重试）
+            print("[*] 正在查找邮箱输入框...")
+            email_found = False
+            for attempt in range(3):
+                if find_and_fill_email(page, email):
+                    email_found = True
+                    break
+                print(f"[!] 第 {attempt + 1} 次尝试未找到邮箱输入框，等待后重试...")
+                random_delay(3000, 5000)
+                wait_for_page_ready(page, 10000)
+            
+            if not email_found:
+                # 保存截图用于调试
+                try:
+                    page.screenshot(path="debug_email_not_found.png")
+                    print("[!] 已保存调试截图: debug_email_not_found.png")
+                except:
+                    pass
+                return LoginResult(False, "未找到邮箱输入框", "EMAIL_INPUT_NOT_FOUND")
+            
+            random_delay(2000, 4000)
+            
+            # 等待页面跳转
+            print("[*] 等待页面响应...")
+            wait_for_page_ready(page, 15000)
+            random_delay(3000, 5000)
+            
+            error = check_for_errors(page, strict=False)
+            if error:
+                return LoginResult(False, f"输入邮箱后检测到错误: {error}", "BLOCKED")
+            
+            # 打印当前页面结构
+            print("[*] 分析邮箱提交后的页面...")
+            print_page_structure(page)
+            
+            # 2. 检测是否进入注册流程（多次尝试）
+            print("[*] 检测是否进入注册流程...")
+            is_registration = False
+            for attempt in range(3):
+                if detect_registration_page(page):
+                    is_registration = True
+                    break
+                print(f"[!] 第 {attempt + 1} 次检测未发现注册页面，等待...")
+                random_delay(2000, 3000)
+            
+            if not is_registration:
+                try:
+                    page.screenshot(path="debug_not_registration.png")
+                    print("[!] 已保存调试截图: debug_not_registration.png")
+                except:
+                    pass
+                return LoginResult(False, "未进入注册页面，邮箱可能已被注册", "ALREADY_REGISTERED")
+            
+            print("[+] 检测到注册页面")
+            
+            # 3. 填写注册表单
+            if not fill_registration_form(page, display_name, password):
+                try:
+                    page.screenshot(path="debug_form_failed.png")
+                    print("[!] 已保存调试截图: debug_form_failed.png")
+                except:
+                    pass
+                return LoginResult(False, "填写注册表单失败", "FORM_FILL_FAILED")
+            
+            # 等待页面处理
+            print("[*] 等待表单提交...")
+            wait_for_page_ready(page, 15000)
+            random_delay(3000, 5000)
+            
+            # 4. 等待验证码页面
+            print("[*] 等待验证码页面...")
+            random_delay(3000, 5000)
+            
+            # 打印验证码页面结构
+            print("[*] 分析验证码页面...")
+            print_page_structure(page)
+            
+            # 5. 获取验证码
+            try:
+                code = mail_client.wait_for_verification_code(
+                    email=email,
+                    timeout_ms=120000,
+                    poll_interval_ms=3000
+                )
+            except TimeoutError as e:
+                return LoginResult(False, str(e), "VERIFICATION_TIMEOUT")
+            
+            # 6. 填写验证码
+            if not fill_verification_code(page, code):
+                try:
+                    page.screenshot(path="debug_code_failed.png")
+                    print("[!] 已保存调试截图: debug_code_failed.png")
+                except:
+                    pass
+                return LoginResult(False, "填写验证码失败", "CODE_FILL_FAILED")
+            
+            # 等待页面处理
+            print("[*] 等待验证码处理...")
+            wait_for_page_ready(page, 15000)
+            random_delay(3000, 5000)
+            
+            # 7. 检查是否需要设置密码（AWS 流程：邮箱→姓名→验证码→密码）
+            password_inputs = page.locator('input[type="password"]').all()
+            if len(password_inputs) > 0:
+                print("[*] 检测到密码设置页面...")
+                if not fill_password_step(page, password):
+                    try:
+                        page.screenshot(path="debug_password_failed.png")
+                        print("[!] 已保存调试截图: debug_password_failed.png")
+                    except:
+                        pass
+                    return LoginResult(False, "填写密码失败", "PASSWORD_FILL_FAILED")
+                
+                wait_for_page_ready(page, 15000)
+                random_delay(3000, 5000)
+            
+            # 8. 完成完整的授权流程（可能包含多个授权页面）
+            # 流程：Authorization requested → Allow access → 成功页面
+            if complete_authorization_flow(page, max_attempts=5):
+                return LoginResult(True, "注册并授权成功", email=email, password=password)
+            
+            final_url = page.url
+            error = check_for_errors(page, strict=False)
+            if error:
+                return LoginResult(False, f"最终检查发现错误: {error}", "BLOCKED")
+            
+            return LoginResult(False, f"注册流程未完成，当前 URL: {final_url}", "INCOMPLETE", email=email, password=password)
+            
+    except Exception as e:
+        return LoginResult(False, f"发生异常: {str(e)}", "EXCEPTION")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="使用 Camoufox 完成 Amazon 设备授权登录/注册")
+    parser.add_argument("--url", required=True, help="设备验证链接")
+    parser.add_argument("--mode", choices=["login", "register"], default="login", help="模式: login 或 register")
+    
+    # 登录模式参数
+    parser.add_argument("--email", help="AWS 邮箱（登录模式必需）")
+    parser.add_argument("--password", help="AWS 密码（登录模式必需，注册模式可选-不提供则自动生成）")
+    parser.add_argument("--mfa-secret", help="MFA 密钥 (可选)")
+    
+    # 注册模式参数
+    parser.add_argument("--gptmail-url", help="GPTMail API 地址（注册模式必需）")
+    parser.add_argument("--gptmail-key", help="GPTMail API 密钥（注册模式必需）")
+    parser.add_argument("--email-prefix", help="邮箱前缀（可选）")
+    parser.add_argument("--email-domain", help="邮箱域名（可选）")
+    parser.add_argument("--full-name", help="显示名称（可选）")
+    
+    # 通用参数
+    parser.add_argument("--proxy", help="代理服务器 (格式: http://host:port)")
+    parser.add_argument("--headless", action="store_true", help="无头模式")
+    parser.add_argument("--json", action="store_true", help="JSON 格式输出")
+    
+    args = parser.parse_args()
+    
+    if args.mode == "login":
+        if not args.email:
+            parser.error("登录模式需要 --email 参数")
+        if not args.password:
+            parser.error("登录模式需要 --password 参数")
+        
+        credentials = Credentials(
+            email=args.email,
+            password=args.password,
+            mfa_secret=args.mfa_secret
+        )
+        
+        result = login_with_camoufox(
+            verification_url=args.url,
+            credentials=credentials,
+            headless=args.headless,
+            proxy=args.proxy
+        )
+    else:
+        # 注册模式
+        if not args.gptmail_url or not args.gptmail_key:
+            parser.error("注册模式需要 --gptmail-url 和 --gptmail-key 参数")
+        
+        reg_options = RegistrationOptions(
+            gptmail_base_url=args.gptmail_url,
+            gptmail_api_key=args.gptmail_key,
+            password=args.password,  # 可选，不提供则自动生成
+            email_prefix=args.email_prefix,
+            email_domain=args.email_domain,
+            full_name=args.full_name
+        )
+        
+        result = register_with_camoufox(
+            verification_url=args.url,
+            reg_options=reg_options,
+            headless=args.headless,
+            proxy=args.proxy
+        )
+    
+    if args.json:
+        output = {
+            "success": result.success,
+            "message": result.message,
+            "error_code": result.error_code,
+            "email": result.email,
+            "password": result.password
+        }
+        print(json.dumps(output))
+    else:
+        if result.success:
+            print(f"\n✅ {result.message}")
+            if result.email:
+                print(f"   邮箱: {result.email}")
+            if result.password:
+                print(f"   密码: {result.password}")
+        else:
+            print(f"\n❌ {result.message}")
+            if result.error_code:
+                print(f"   错误码: {result.error_code}")
+    
+    sys.exit(0 if result.success else 1)
+
+
+if __name__ == "__main__":
+    main()

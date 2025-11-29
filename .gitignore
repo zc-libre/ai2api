@@ -1,42 +1,48 @@
-# Node.js 依赖
+# 敏感文件
+.env
+.env.*
+!.env.example
+config.json
+*.json.backup
+
+# Node.js
 node_modules/
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*
-package-lock.json
+pnpm-debug.log*
 
-# 敏感数据目录（包含 tokens 和 API keys）
-data/
-*.json.backup
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
 
-# 配置文件（可能包含敏感信息）
-config.json
-
-# 日志文件
-logs/
-*.log
-
-# 环境变量文件
-.env
-.env.local
-.env.*.local
-
-# 操作系统文件
-.DS_Store
-Thumbs.db
-
-# IDE 和编辑器
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
-# 临时文件
-tmp/
-temp/
-*.tmp
+# OS
+.DS_Store
+Thumbs.db
 
-# 测试覆盖率
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# 数据目录
+data/
+output/
+logs/
+*.log
+
+# 测试输出
+*.png
+!public/**/*.png
 coverage/
-.nyc_output/
+
+# Playwright
+.playwright-mcp/

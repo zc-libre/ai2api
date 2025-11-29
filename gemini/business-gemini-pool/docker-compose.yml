@@ -1,0 +1,26 @@
+name: business-gemini-pool
+
+services:
+  app:
+    build: .
+    container_name: business-gemini-pool
+    restart: unless-stopped
+    ports:
+      - "9012:9012"
+    volumes:
+      - ./business_gemini_session.json:/app/business_gemini_session.json:rw
+    user: "1000:1000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:9012/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - gemini-network
+
+networks:
+  gemini-network:
+    driver: bridge

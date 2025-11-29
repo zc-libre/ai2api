@@ -1,0 +1,12 @@
+# Business Gemini OpenAPI 兼容服务依赖
+# Python 3.8+
+
+# Web框架
+flask>=2.0.0
+flask-cors>=3.0.0
+
+# HTTP请求
+requests>=2.25.0
+
+# SSL警告处理（requests依赖）
+urllib3>=1.26.0
