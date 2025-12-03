@@ -67,13 +67,23 @@ class AccountStore:
         )
         return result.scalar_one_or_none()
 
-    async def find_all(self, type: str = "kiro") -> List[Account]:
-        """获取所有指定类型的账号"""
-        result = await self.session.execute(
-            select(Account)
-            .where(Account.type == type)
-            .order_by(Account.createdAt.desc())
-        )
+    async def find_all(self, type: str = "kiro", include_all_types: bool = False) -> List[Account]:
+        """获取所有指定类型的账号
+        
+        Args:
+            type: 账号类型，默认为 "kiro"
+            include_all_types: 是否包含所有类型的账号
+        """
+        if include_all_types:
+            result = await self.session.execute(
+                select(Account).order_by(Account.createdAt.desc())
+            )
+        else:
+            result = await self.session.execute(
+                select(Account)
+                .where(Account.type == type)
+                .order_by(Account.createdAt.desc())
+            )
         return list(result.scalars().all())
 
     async def find_enabled(self, type: str = "kiro") -> List[Account]:

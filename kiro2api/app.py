@@ -293,10 +293,25 @@ async def get_db_session():
 
 
 @app.get("/api/accounts")
-async def list_accounts(session: AsyncSession = Depends(get_db_session)):
-    """获取所有 Kiro 账号"""
+async def list_accounts(
+    session: AsyncSession = Depends(get_db_session),
+    type: str = "kiro"
+):
+    """获取账号列表
+    
+    Args:
+        type: 账号类型过滤
+            - "kiro": 只查询 Kiro 账号（默认）
+            - "amazonq": 只查询 Amazon Q 账号
+            - "all": 查询所有类型账号
+    """
     store = AccountStore(session)
-    accounts = await store.find_all(type="kiro")
+    
+    if type == "all":
+        accounts = await store.find_all(include_all_types=True)
+    else:
+        accounts = await store.find_all(type=type)
+    
     return {
         "success": True,
         "total": len(accounts),

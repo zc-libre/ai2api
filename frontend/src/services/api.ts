@@ -414,7 +414,8 @@ export const kiroApi = {
   getHealth: () => kiroRequest('/health'),
 
   // 获取所有账号
-  getAccounts: () => kiroRequest('/api/accounts'),
+  // type: 'kiro' | 'amazonq' | 'all'，默认查询所有类型
+  getAccounts: (type: string = 'all') => kiroRequest(`/api/accounts?type=${type}`),
 
   // 获取账号详情
   getAccountDetail: (id: string) => kiroRequest(`/api/accounts/${encodeURIComponent(id)}`),
