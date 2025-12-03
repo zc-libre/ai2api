@@ -95,6 +95,7 @@ const navGroups: NavGroup[] = [
     children: [
       { icon: Home, label: '概览', path: '/kiro' },
       { icon: Users, label: '账号管理', path: '/kiro/accounts' },
+      { icon: ListTodo, label: '任务管理', path: '/kiro/tasks' },
     ],
   },
 ]

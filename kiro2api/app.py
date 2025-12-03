@@ -1,13 +1,15 @@
 import time
 import json
 import logging
+import asyncio
 import httpx
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
 
-from config import MODEL_MAP, KIRO_BASE_URL
+from config import MODEL_MAP, KIRO_BASE_URL, get_register_config
 from models import ChatCompletionRequest
 from models.claude_schemas import ClaudeRequest
 from auth import verify_api_key, token_manager
@@ -15,11 +17,30 @@ from services import create_non_streaming_response, create_streaming_response
 from services.claude_converter import convert_claude_to_codewhisperer_request
 from services.claude_stream_handler import ClaudeStreamHandler
 from storage import init_db, close_db, AccountStore, get_db
+from register import task_manager, RegisterTask, auto_register, AutoRegisterOptions
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)  # for dev
 # logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+async def execute_register_task(task: RegisterTask) -> dict:
+    """执行注册任务的回调函数"""
+    options = AutoRegisterOptions(
+        password=task.options.password,
+        full_name=task.options.full_name,
+        headless=task.options.headless,
+        label=task.options.label,
+        max_retries=task.options.max_retries,
+        on_progress=lambda step, percent, msg=None: (
+            task_manager.update_progress(task.id, step, percent),
+            task_manager.add_log(task.id, "info", msg) if msg else None
+        ),
+    )
+    
+    result = await auto_register(options)
+    return result
 
 
 @asynccontextmanager
@@ -28,7 +49,13 @@ async def lifespan(app: FastAPI):
     # 启动时初始化数据库
     await init_db()
     logger.info("数据库连接已初始化")
+    
+    # 初始化任务管理器
+    task_manager.set_executor(execute_register_task)
+    logger.info("注册任务管理器已初始化")
+    
     yield
+    
     # 关闭时清理数据库连接
     await close_db()
     logger.info("数据库连接已关闭")
@@ -452,13 +479,230 @@ async def delete_account(
     }
 
 
+# ============================================================================
+# 自动注册 API 端点
+# ============================================================================
+
+class CreateRegisterTaskRequest(BaseModel):
+    """创建注册任务请求"""
+    label: Optional[str] = None
+    password: Optional[str] = None
+    fullName: Optional[str] = None
+    headless: Optional[bool] = None
+    maxRetries: int = 3
+
+
+@app.post("/api/register")
+async def create_register_task(request: CreateRegisterTaskRequest):
+    """
+    创建新的注册任务
+    
+    注册任务会被加入队列，按顺序执行。
+    返回任务 ID，可用于查询任务状态和日志。
+    """
+    # 检查是否配置了 GPTMail
+    config = get_register_config()
+    if not config.gptmail:
+        raise HTTPException(
+            status_code=400,
+            detail="未配置 GPTMail API，无法使用自动注册功能。请设置 GPTMAIL_API_KEY 环境变量。"
+        )
+    
+    from register.task_manager import RegisterTaskOptions
+    
+    options = RegisterTaskOptions(
+        password=request.password,
+        full_name=request.fullName,
+        headless=request.headless if request.headless is not None else config.headless,
+        label=request.label or f"Web-{int(time.time() * 1000)}",
+        max_retries=request.maxRetries,
+    )
+    
+    task = task_manager.create_task(options)
+    
+    return {
+        "success": True,
+        "taskId": task.id,
+        "message": "注册任务已创建",
+        "position": task_manager.queue_length,
+    }
+
+
+@app.get("/api/register/{task_id}")
+async def get_register_task(task_id: str):
+    """查询注册任务状态"""
+    task = task_manager.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    return {
+        "success": True,
+        "task": task_manager.task_to_dict(task),
+    }
+
+
+@app.get("/api/register/{task_id}/logs")
+async def get_register_task_logs(task_id: str, request: Request):
+    """
+    获取任务日志
+    
+    支持两种模式：
+    - 普通 JSON 模式：返回当前所有日志
+    - SSE 模式：实时推送日志（设置 Accept: text/event-stream 头）
+    """
+    task = task_manager.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    # 检查是否请求 SSE
+    accept = request.headers.get("accept", "")
+    if "text/event-stream" in accept:
+        # SSE 模式
+        async def event_generator():
+            # 发送现有日志
+            for log in task.logs:
+                yield {
+                    "event": "log",
+                    "data": json.dumps({"type": "log", "data": {
+                        "timestamp": log.timestamp,
+                        "level": log.level,
+                        "message": log.message,
+                        "context": log.context,
+                    }}),
+                }
+            
+            # 发送当前进度
+            if task.progress:
+                yield {
+                    "event": "progress",
+                    "data": json.dumps({"type": "progress", "data": {
+                        "step": task.progress.step,
+                        "percent": task.progress.percent,
+                    }}),
+                }
+            
+            # 发送当前状态
+            result_data = None
+            if task.result:
+                result_data = {
+                    "email": task.result.aws_email,
+                    "savedAt": task.result.saved_at,
+                }
+            
+            yield {
+                "event": "status",
+                "data": json.dumps({"type": "status", "data": {
+                    "status": task.status.value,
+                    "error": task.error,
+                    "result": result_data,
+                }}),
+            }
+            
+            # 如果任务已完成，结束流
+            if task.status.value in ("completed", "failed"):
+                return
+            
+            # 订阅新事件
+            queue = task_manager.subscribe(task_id)
+            try:
+                while True:
+                    try:
+                        message = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        yield {
+                            "event": message["type"],
+                            "data": json.dumps(message),
+                        }
+                        
+                        # 如果任务结束，停止推送
+                        if message["type"] == "status" and message["data"]["status"] in ("completed", "failed"):
+                            break
+                    except asyncio.TimeoutError:
+                        # 发送心跳
+                        yield {"event": "ping", "data": ""}
+            finally:
+                task_manager.unsubscribe(task_id, queue)
+        
+        return EventSourceResponse(event_generator())
+    
+    # 普通 JSON 模式
+    return {
+        "success": True,
+        "logs": [
+            {
+                "timestamp": log.timestamp,
+                "level": log.level,
+                "message": log.message,
+                "context": log.context,
+            }
+            for log in task.logs
+        ],
+        "progress": {
+            "step": task.progress.step,
+            "percent": task.progress.percent,
+        } if task.progress else None,
+        "status": task.status.value,
+    }
+
+
+@app.get("/api/tasks")
+async def list_tasks():
+    """列出所有注册任务"""
+    tasks = task_manager.get_all_tasks()
+    
+    return {
+        "success": True,
+        "total": len(tasks),
+        "running": task_manager.running_task_id,
+        "queueLength": task_manager.queue_length,
+        "tasks": [
+            {
+                "id": task.id,
+                "status": task.status.value,
+                "createdAt": task.created_at,
+                "completedAt": task.completed_at,
+                "label": task.options.label,
+                "email": task.result.aws_email if task.result else None,
+                "error": task.error,
+            }
+            for task in tasks
+        ],
+    }
+
+
+@app.delete("/api/register/{task_id}")
+async def cancel_register_task(task_id: str):
+    """取消等待中的任务"""
+    task = task_manager.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    if task.status.value == "running":
+        raise HTTPException(status_code=400, detail="无法取消正在运行的任务")
+    
+    if task.status.value in ("completed", "failed"):
+        raise HTTPException(status_code=400, detail="任务已结束，无法取消")
+    
+    success = task_manager.cancel_task(task_id)
+    
+    if not success:
+        raise HTTPException(status_code=400, detail="取消任务失败")
+    
+    return {
+        "success": True,
+        "message": "任务已取消",
+    }
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service information"""
     return {
         "service": "Ki2API",
-        "description": "OpenAI/Claude-compatible API for Claude Sonnet 4 via AWS CodeWhisperer with multi-account rotation support",
-        "version": "3.3.0",
+        "description": "OpenAI/Claude-compatible API for Claude Sonnet 4 via AWS CodeWhisperer with multi-account rotation and auto-registration support",
+        "version": "4.0.0",
         "endpoints": {
             "models": "/v1/models",
             "chat": "/v1/chat/completions",
@@ -466,7 +710,9 @@ async def root():
             "health": "/health",
             "token_status": "/v1/token/status",
             "token_reset": "/v1/token/reset",
-            "accounts": "/api/accounts"
+            "accounts": "/api/accounts",
+            "register": "/api/register",
+            "tasks": "/api/tasks",
         },
         "features": {
             "streaming": True,
@@ -479,7 +725,8 @@ async def root():
             "multi_account_rotation": True,
             "rate_limit_failover": True,
             "claude_api_compatible": True,
-            "database_storage": True
+            "database_storage": True,
+            "auto_registration": True,
         }
     }
 

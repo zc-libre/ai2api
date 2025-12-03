@@ -148,3 +148,61 @@ class AccountStore:
 
         result = await self.session.execute(query)
         return result.scalar_one()
+
+    async def create_amazonq_account(
+        self,
+        client_id: str,
+        client_secret: str,
+        access_token: str,
+        refresh_token: str,
+        expires_in: Optional[int] = None,
+        aws_email: Optional[str] = None,
+        aws_password: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> Account:
+        """
+        创建 Amazon Q 账号（自动注册流程使用）
+        
+        Args:
+            client_id: OIDC 客户端 ID
+            client_secret: OIDC 客户端密钥
+            access_token: 访问令牌
+            refresh_token: 刷新令牌
+            expires_in: 令牌过期时间（秒）
+            aws_email: AWS 邮箱
+            aws_password: AWS 密码
+            label: 账号标签
+        
+        Returns:
+            Account: 创建的账号
+        """
+        account = Account(
+            id=generate_cuid(),
+            clientId=client_id,
+            clientSecret=client_secret,
+            accessToken=access_token,
+            refreshToken=refresh_token,
+            expiresIn=expires_in,
+            awsEmail=aws_email,
+            awsPassword=aws_password,
+            label=label,
+            enabled=True,
+            type="amazonq",
+            savedAt=datetime.utcnow(),
+            createdAt=datetime.utcnow(),
+            updatedAt=datetime.utcnow(),
+        )
+
+        self.session.add(account)
+        await self.session.commit()
+        await self.session.refresh(account)
+
+        logger.info(f"Amazon Q 账号已创建: {account.id} (email: {account.awsEmail})")
+        return account
+
+    async def find_by_email(self, email: str) -> Optional[Account]:
+        """根据邮箱获取账号"""
+        result = await self.session.execute(
+            select(Account).where(Account.awsEmail == email)
+        )
+        return result.scalar_one_or_none()

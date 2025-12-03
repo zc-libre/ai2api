@@ -21,6 +21,14 @@ def get_database_url() -> str:
     if not url:
         raise ValueError("DATABASE_URL 环境变量未设置")
 
+    # 移除 Prisma 特有的 ?schema=xxx 参数（asyncpg 不支持）
+    if "?schema=" in url:
+        url = url.split("?schema=")[0]
+    elif "&schema=" in url:
+        # 处理 schema 不是第一个参数的情况
+        import re
+        url = re.sub(r'[&?]schema=[^&]*', '', url)
+
     # 将 postgresql:// 转换为 postgresql+asyncpg://
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -53,8 +61,10 @@ async def init_db():
         expire_on_commit=False,
     )
 
-    # 注意：不自动创建表，使用与 amazonq2api 相同的数据库
-    # 表结构由 Prisma 管理
+    # 创建缺失的表（已存在则跳过）
+    async with _engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     logger.info("数据库连接初始化完成")
 
 

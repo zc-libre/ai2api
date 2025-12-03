@@ -437,5 +437,33 @@ export const kiroApi = {
   // 删除账号
   deleteAccount: (id: string) =>
     kiroRequest(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ========== 自动注册任务 API ==========
+  
+  // 获取所有任务
+  getTasks: () => kiroRequest('/api/tasks'),
+
+  // 创建注册任务
+  createTask: (options: {
+    password?: string
+    fullName?: string
+    headless?: boolean
+    label?: string
+    maxRetries?: number
+  }) =>
+    kiroRequest('/api/register', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    }),
+
+  // 查询任务状态
+  getTaskStatus: (taskId: string) => kiroRequest(`/api/register/${taskId}`),
+
+  // 获取任务日志
+  getTaskLogs: (taskId: string) => kiroRequest(`/api/register/${taskId}/logs`),
+
+  // 取消任务
+  cancelTask: (taskId: string) =>
+    kiroRequest(`/api/register/${taskId}`, { method: 'DELETE' }),
 }
 
