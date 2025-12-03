@@ -80,10 +80,10 @@ export function KeyManage() {
     try {
       const res = await adminApi.generateKey({
         name: keyName || undefined,
-        rate_limit: enableRateLimit
+        rateLimit: enableRateLimit
           ? {
-              max_requests: parseInt(maxRequests) || 100,
-              window_seconds: parseInt(windowSeconds) || 60,
+              maxRequests: parseInt(maxRequests) || 100,
+              windowSeconds: parseInt(windowSeconds) || 60,
             }
           : undefined,
       })

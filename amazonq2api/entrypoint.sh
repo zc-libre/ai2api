@@ -21,7 +21,10 @@ echo "🔄 Running database migrations..."
 # 运行 Prisma 迁移
 # 使用 db push 进行开发/简单部署（自动同步 schema）
 # 生产环境建议使用 migrate deploy
-npx prisma db push --skip-generate
+npx prisma db push
+
+# 生成 Prisma Client（确保运行时可用）
+npx prisma generate
 
 echo "✅ Database migrations completed!"
 

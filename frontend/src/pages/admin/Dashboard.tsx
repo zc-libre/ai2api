@@ -134,15 +134,6 @@ export function Dashboard() {
     }
   }
 
-  const formatUptime = (seconds: number): string => {
-    const days = Math.floor(seconds / 86400)
-    const hours = Math.floor((seconds % 86400) / 3600)
-    const mins = Math.floor((seconds % 3600) / 60)
-    if (days > 0) return `${days}天 ${hours}时`
-    if (hours > 0) return `${hours}时 ${mins}分`
-    return `${mins}分钟`
-  }
-
   const formatIdleTime = (seconds: number): string => {
     if (seconds < 60) return `${seconds} 秒`
     if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`

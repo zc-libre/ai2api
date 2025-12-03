@@ -45,8 +45,7 @@ services:
       start_period: 10s
     
     networks:
-      - ai2api-network
-    
+      - proxy-net    
     logging:
       driver: "json-file"
       options:
@@ -82,11 +81,15 @@ services:
       - GPTMAIL_BASE_URL=${GPTMAIL_BASE_URL:-https://mail.chatgpt.org.uk}
       - GPTMAIL_EMAIL_PREFIX=${GPTMAIL_EMAIL_PREFIX:-}
       - GPTMAIL_EMAIL_DOMAIN=${GPTMAIL_EMAIL_DOMAIN:-}
-      - HTTP_PROXY=${HTTP_PROXY:-}
-      - PROXY_LIST=${PROXY_LIST:-}
-    
+
+
+      # 通过“容器名”访问代理（无需网络别名）
+      - HTTP_PROXY=http://mihomo:7890
+      - HTTPS_PROXY=http://mihomo:7890
+      - ALL_PROXY=socks5h://mihomo:7890
+      - NO_PROXY=localhost,127.0.0.1,::1,mihomo        
     networks:
-      - ai2api-network
+      - proxy-net
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
@@ -134,9 +137,8 @@ services:
     
     environment:
       - NODE_ENV=production
-    
     networks:
-      - ai2api-network
+      - proxy-net    
     
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8045/v1/models"]
@@ -181,6 +183,12 @@ services:
       # 多账号配置（可选）
       - KIRO_AUTH_CONFIG=${KIRO_AUTH_CONFIG:-}
     
+
+      # 通过“容器名”访问代理（无需网络别名）
+      - HTTP_PROXY=http://mihomo:7890
+      - HTTPS_PROXY=http://mihomo:7890
+      - ALL_PROXY=socks5h://mihomo:7890
+      - NO_PROXY=localhost,127.0.0.1,::1,mihomo        
     volumes:
       # 自动挂载 AWS SSO token 目录（单账号模式）
       - ${AWS_SSO_CACHE_PATH:-~/.aws/sso/cache}:/root/.aws/sso/cache:ro
@@ -188,7 +196,7 @@ services:
       # - ./kiro2api/auth_config.json:/app/auth_config.json:ro
     
     networks:
-      - ai2api-network
+      - proxy-net
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8989/health"]
@@ -223,7 +231,7 @@ services:
       - "${FRONTEND_PORT:-80}:80"
     
     networks:
-      - ai2api-network
+      - proxy-net
     
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
@@ -241,11 +249,10 @@ services:
 # ============================================
 # 网络配置
 # ============================================
-networks:
-  ai2api-network:
-    name: ai2api-network
-    driver: bridge
 
+networks:
+ proxy-net:
+   external: true
 # ============================================
 # 数据卷
 # ============================================

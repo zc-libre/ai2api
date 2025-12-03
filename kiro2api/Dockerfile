@@ -20,6 +20,7 @@ COPY models/ ./models/
 COPY auth/ ./auth/
 COPY parsers/ ./parsers/
 COPY services/ ./services/
+COPY storage/ ./storage/
 
 # Copy example config for multi-account setup
 COPY auth_config.json.example ./

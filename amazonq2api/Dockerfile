@@ -69,6 +69,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-xcb1 \
     libxcb1 \
     libxext6 \
+    # GTK3（Camoufox/Firefox 必需）
+    libgtk-3-0 \
     # 字体
     fonts-liberation \
     fonts-noto-cjk \
@@ -94,6 +96,9 @@ FROM base AS node-deps
 
 # 复制 package.json 和 lock 文件
 COPY package.json package-lock.json* pnpm-lock.yaml* ./
+
+# 复制 prisma schema（npm install 的 postinstall 需要）
+COPY prisma/ ./prisma/
 
 # 安装 Node.js 依赖
 RUN npm install --omit=dev || npm install
@@ -133,9 +138,8 @@ print('Extensions ready') \
 # ============================================
 FROM base AS runtime
 
-# 创建非 root 用户
-RUN groupadd --gid 1000 appuser \
-    && useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
+# 使用镜像中已存在的 node 用户（UID/GID 1000）
+# node:20-bookworm-slim 镜像已包含 node:node 用户
 
 # 设置工作目录
 WORKDIR /app
@@ -147,21 +151,17 @@ COPY --from=node-deps /app/node_modules ./node_modules
 COPY --from=python-deps /app/camoufox/.venv ./camoufox/.venv
 
 # 从 python-deps 阶段复制 Camoufox 浏览器缓存
-# Camoufox 默认将浏览器下载到用户目录下
-COPY --from=python-deps /root/.local /home/appuser/.local
-COPY --from=python-deps /root/.cache /home/appuser/.cache
+# Camoufox 将浏览器下载到 /root/.cache 目录
+COPY --from=python-deps /root/.cache /home/node/.cache
 
 # 复制项目源代码
-COPY --chown=appuser:appuser . .
+COPY --chown=node:node . .
 
-# 创建输出目录
-RUN mkdir -p /app/output && chown -R appuser:appuser /app
+# 创建输出目录并设置权限
+RUN mkdir -p /app/output && chown -R node:node /app /home/node/.cache
 
-# 设置目录权限
-RUN chown -R appuser:appuser /home/appuser
-
-# 切换到非 root 用户
-USER appuser
+# 切换到非 root 用户（使用镜像内置的 node 用户）
+USER node
 
 # 暴露端口
 EXPOSE 3000

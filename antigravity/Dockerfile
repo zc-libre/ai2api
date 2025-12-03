@@ -1,24 +1,4 @@
-# 第一阶段：构建前端
-FROM node:18-alpine AS frontend-builder
-
-# 安装 pnpm
-RUN npm install -g pnpm
-
-WORKDIR /frontend
-
-# 复制前端依赖文件
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-
-# 安装前端依赖
-RUN pnpm install --frozen-lockfile
-
-# 复制前端源码
-COPY frontend/ ./
-
-# 构建前端
-RUN pnpm build
-
-# 第二阶段：构建后端服务
+# 单阶段构建：后端服务 + 预构建的前端
 FROM node:18-alpine
 
 # 设置工作目录
@@ -37,8 +17,8 @@ RUN pnpm install --prod --frozen-lockfile
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 
-# 从前端构建阶段复制构建产物到 public 目录
-COPY --from=frontend-builder /frontend/dist ./public/
+# 复制预构建的前端静态文件
+COPY public/ ./public/
 
 # 创建数据目录
 RUN mkdir -p /app/data
