@@ -91,7 +91,7 @@ class MultiAccountTokenManager:
             raise
 
     async def _load_from_database(self) -> List[AuthConfig]:
-        """从数据库加载账号配置"""
+        """从数据库加载账号配置（支持 kiro 和 amazonq 两种类型）"""
         try:
             # 检查是否配置了数据库
             database_url = os.getenv("DATABASE_URL")
@@ -106,17 +106,38 @@ class MultiAccountTokenManager:
 
             async for session in get_db():
                 store = AccountStore(session)
-                accounts = await store.find_enabled(type="kiro")
-
+                
                 configs = []
-                for acc in accounts:
+                
+                # 加载 kiro 类型账号
+                kiro_accounts = await store.find_enabled(type="kiro")
+                for acc in kiro_accounts:
                     if acc.refreshToken:
                         configs.append(AuthConfig(
                             refresh_token=acc.refreshToken,
                             access_token=acc.accessToken,
                             disabled=not acc.enabled,
                             name=acc.label or acc.id,
+                            account_type="kiro",
                         ))
+                
+                # 加载 amazonq 类型账号
+                amazonq_accounts = await store.find_enabled(type="amazonq")
+                for acc in amazonq_accounts:
+                    if acc.refreshToken and acc.clientId and acc.clientSecret:
+                        configs.append(AuthConfig(
+                            refresh_token=acc.refreshToken,
+                            access_token=acc.accessToken,
+                            disabled=not acc.enabled,
+                            name=acc.label or acc.awsEmail or acc.id,
+                            account_type="amazonq",
+                            client_id=acc.clientId,
+                            client_secret=acc.clientSecret,
+                        ))
+                
+                if configs:
+                    logger.info(f"从数据库加载了 {len([c for c in configs if c.account_type == 'kiro'])} 个 kiro 账号, "
+                               f"{len([c for c in configs if c.account_type == 'amazonq'])} 个 amazonq 账号")
 
                 return configs
         except Exception as e:
@@ -234,35 +255,83 @@ class MultiAccountTokenManager:
             return None
     
     async def _refresh_single_token(self, config: AuthConfig) -> Optional[str]:
-        """刷新单个账号的 token"""
+        """刷新单个账号的 token（支持 kiro 和 amazonq 两种类型）"""
         if not config.refresh_token:
             logger.error(f"配置 {config.name} 没有 refresh_token")
             return None
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self.REFRESH_URL,
-                    json={"refreshToken": config.refresh_token},
-                    timeout=30
-                )
-                response.raise_for_status()
-                
-                data = response.json()
-                access_token = data.get("accessToken")
-                
-                if not access_token:
-                    logger.error(f"刷新响应中没有 accessToken: {data}")
-                    return None
-                
-                return access_token
+            if config.account_type == "amazonq":
+                return await self._refresh_amazonq_token(config)
+            else:
+                return await self._refresh_kiro_token(config)
                 
         except httpx.HTTPStatusError as e:
-            logger.error(f"刷新 token HTTP 错误: {e.response.status_code}")
+            logger.error(f"刷新 token HTTP 错误 ({config.account_type}): {e.response.status_code}")
             raise
         except Exception as e:
-            logger.error(f"刷新 token 失败: {e}")
+            logger.error(f"刷新 token 失败 ({config.account_type}): {e}")
             raise
+    
+    async def _refresh_kiro_token(self, config: AuthConfig) -> Optional[str]:
+        """刷新 Kiro 账号的 token"""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.REFRESH_URL,
+                json={"refreshToken": config.refresh_token},
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            access_token = data.get("accessToken")
+            
+            if not access_token:
+                logger.error(f"Kiro 刷新响应中没有 accessToken: {data}")
+                return None
+            
+            return access_token
+    
+    async def _refresh_amazonq_token(self, config: AuthConfig) -> Optional[str]:
+        """刷新 Amazon Q 账号的 token"""
+        from config import OIDC_TOKEN_URL, USER_AGENT, X_AMZ_USER_AGENT, AMZ_SDK_REQUEST
+        
+        if not config.client_id or not config.client_secret:
+            logger.error(f"Amazon Q 配置 {config.name} 缺少 client_id 或 client_secret")
+            return None
+        
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+            "X-Amz-User-Agent": X_AMZ_USER_AGENT,
+            "Amz-Sdk-Request": AMZ_SDK_REQUEST,
+        }
+        
+        payload = {
+            "clientId": config.client_id,
+            "clientSecret": config.client_secret,
+            "refreshToken": config.refresh_token,
+            "grantType": "refresh_token",
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                OIDC_TOKEN_URL,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            access_token = data.get("accessToken")
+            
+            if not access_token:
+                logger.error(f"Amazon Q 刷新响应中没有 accessToken: {data}")
+                return None
+            
+            logger.debug(f"Amazon Q token 刷新成功，有效期: {data.get('expiresIn')} 秒")
+            return access_token
     
     def mark_token_exhausted(self, reason: str = "unknown"):
         """

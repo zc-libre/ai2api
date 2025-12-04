@@ -18,10 +18,15 @@ class AuthConfig:
     access_token: Optional[str] = None
     disabled: bool = False
     name: Optional[str] = None  # 可选的配置名称，用于标识
+    account_type: str = "kiro"  # 账号类型: "kiro" 或 "amazonq"
+    client_id: Optional[str] = None  # Amazon Q 账号需要
+    client_secret: Optional[str] = None  # Amazon Q 账号需要
 
     def __post_init__(self):
         if not self.refresh_token:
             raise ValueError("refresh_token 不能为空")
+        if self.account_type == "amazonq" and (not self.client_id or not self.client_secret):
+            raise ValueError("amazonq 类型账号需要 client_id 和 client_secret")
 
 
 def load_auth_configs() -> List[AuthConfig]:

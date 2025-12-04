@@ -976,6 +976,10 @@ def fill_password_step(page: Page, password: str) -> bool:
     wait_for_page_ready(page, 10000)
     random_delay(2000, 3000)
     
+    # 处理可能出现的 Cookie 弹窗（可能会遮挡密码输入框）
+    handle_cookie_consent(page)
+    random_delay(500, 1000)
+    
     # 打印页面结构用于调试
     print_page_structure(page)
     
@@ -1756,15 +1760,29 @@ def handle_cookie_consent(page: Page) -> bool:
     """
     print("[*] 检查是否存在 Cookie 同意弹窗...")
     
+    # Cookie 弹窗是通过外部 JS 动态加载的，需要等待它出现
+    # 先尝试等待 Accept 按钮出现（最多等待 5 秒）
+    accept_btn_selector = 'button[data-id="awsccc-cb-btn-accept"]'
+    try:
+        page.wait_for_selector(accept_btn_selector, state='attached', timeout=5000)
+        print("[*] Cookie 弹窗已加载")
+    except:
+        print("[*] Cookie 弹窗未出现（可能已处理或不存在）")
+        # 继续尝试检测，可能已经存在
+    
+    # 检查弹窗容器是否存在（仅用于调试日志）
+    try:
+        popup_container = page.locator('[data-id="awsccc-cb"]')
+        popup_count = popup_container.count()
+        print(f"[DEBUG] Cookie 弹窗容器数量: {popup_count}")
+        
+        if popup_count > 0:
+            style = popup_container.first.get_attribute('style') or ''
+            print(f"[DEBUG] Cookie 弹窗容器 style: {style}")
+    except Exception as e:
+        print(f"[DEBUG] 检查弹窗容器时出错: {e}")
+    
     # AWS Cookie 同意弹窗的 Accept 按钮选择器
-    # HTML 结构:
-    # <div id="awsccc-sb-ux-c">
-    #   <div data-id="awsccc-cb" style="display: block;">  <-- 实际弹窗容器
-    #     <div id="awsccc-cb-c" ...>
-    #       <div id="awsccc-cb-buttons">
-    #         <button data-id="awsccc-cb-btn-accept" aria-label="Accept all cookies" class="awsccc-u-btn awsccc-u-btn-primary">
-    #           <span>Accept</span>
-    #         </button>
     cookie_selectors = [
         'button[data-id="awsccc-cb-btn-accept"]',  # AWS 标准 Accept 按钮（精确匹配）
         '#awsccc-cb-buttons button.awsccc-u-btn-primary',  # 按钮容器内的主按钮
@@ -1778,13 +1796,16 @@ def handle_cookie_consent(page: Page) -> bool:
             
             # 检查元素数量
             count = page.locator(selector).count()
+            print(f"[DEBUG] 选择器 '{selector}' 匹配数量: {count}")
             if count == 0:
                 continue
             
             # 检查元素是否可见（增加超时时间）
             try:
                 is_visible = btn.is_visible(timeout=2000)
-            except:
+                print(f"[DEBUG] 选择器 '{selector}' is_visible: {is_visible}")
+            except Exception as vis_err:
+                print(f"[DEBUG] is_visible 检测失败: {vis_err}")
                 is_visible = False
             
             if not is_visible:
@@ -1792,13 +1813,16 @@ def handle_cookie_consent(page: Page) -> bool:
                 # 因为某些情况下 Playwright 的可见性判断可能不准确
                 try:
                     box = btn.bounding_box()
-                    if box and box['width'] > 0 and box['height'] > 0:
+                    print(f"[DEBUG] bounding_box: {box}")
+                    if box and box.get('width', 0) > 0 and box.get('height', 0) > 0:
                         is_visible = True
                         print(f"[*] 按钮存在但 is_visible=false，通过 bounding_box 确认可见")
-                except:
+                except Exception as box_err:
+                    print(f"[DEBUG] bounding_box 检测失败: {box_err}")
                     continue
             
             if not is_visible:
+                print(f"[DEBUG] 选择器 '{selector}' 元素不可见，跳过")
                 continue
             
             print(f"[*] 发现 Cookie Accept 按钮: {selector}")
@@ -1809,17 +1833,27 @@ def handle_cookie_consent(page: Page) -> bool:
             
             print("[+] 已点击 Cookie Accept 按钮")
             
-            # 等待弹窗消失
+            # 等待弹窗消失（检查 display 样式变化或元素隐藏）
             random_delay(500, 1000)
             try:
+                # 方法1: 等待弹窗隐藏
                 page.wait_for_selector('[data-id="awsccc-cb"]', state='hidden', timeout=3000)
                 print("[+] Cookie 弹窗已关闭")
             except:
-                print("[*] Cookie 弹窗可能已关闭（超时）")
+                # 方法2: 检查 display 样式是否变为 none
+                try:
+                    style = page.locator('[data-id="awsccc-cb"]').first.get_attribute('style') or ''
+                    if 'display: none' in style or 'display:none' in style:
+                        print("[+] Cookie 弹窗已关闭 (display: none)")
+                    else:
+                        print(f"[*] Cookie 弹窗可能已关闭（超时），当前 style: {style}")
+                except:
+                    print("[*] Cookie 弹窗可能已关闭（超时）")
             
             return True
                     
         except Exception as e:
+            print(f"[DEBUG] 处理选择器 '{selector}' 时出错: {e}")
             continue
     
     print("[*] 未发现 Cookie 弹窗或按钮")

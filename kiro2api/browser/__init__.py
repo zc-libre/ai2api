@@ -14,6 +14,11 @@ from .camoufox_bridge import (
     CamoufoxResult,
     CamoufoxRegistrationOptions,
 )
+from .kiro_camoufox import (
+    register_with_kiro_camoufox,
+    KiroRegistrationOptions,
+    KiroRegistrationResult,
+)
 
 __all__ = [
     "register_with_camoufox",
@@ -23,5 +28,9 @@ __all__ = [
     "ensure_camoufox_installed",
     "CamoufoxResult",
     "CamoufoxRegistrationOptions",
+    # Kiro 注册
+    "register_with_kiro_camoufox",
+    "KiroRegistrationOptions",
+    "KiroRegistrationResult",
 ]
 

@@ -1,16 +1,11 @@
 [
   {
-    "refreshToken": "your_first_refresh_token_here",
+    "refreshToken": "aorAAAAAGmnGvgbRm3WJRfEyh4ym7U-6-uzrbmF_9YBB-Qp1jy7t0NWiBaBbgFg_WhtCxuftcRTIQrIYAvqOb73xYBkc0:MGQCMDQJaLFbw5EE+5+lfM3BKNGC9U4NCd+OE+mkxKhy4D9mL8ShY+GVg7Z3DkCgqwDQfQIwfjSlXLgktDR1hCBL/4Kz5kUzJpEXDewAO/+H4GbI4Wf2hM7/o1Bry/fxtBu9c+7a",
     "name": "account_1",
     "disabled": false
   },
   {
-    "refreshToken": "your_second_refresh_token_here",
-    "name": "account_2",
-    "disabled": false
-  },
-  {
-    "refreshToken": "your_third_refresh_token_here",
+    "refreshToken": "aorAAAAAGmnDFcWMtr7xzj8vr_pbIZvNvA2qE5kjsx6F8Zu1H8iFj8YoQQb8dqlOamVYNLsDCVwfigHQCG2Ky9J6sBkc0:MGQCMAfiReDe1nec+xvFAkZVDbDNVhVwHqIgvTMVddikczJGpIjTwTBfJdLgl/QVWDqntwIwegldIPi3RqDjrMAKYhhm9rvJjV+5F478CFvAL2fp3+Z1ZaCABdtu5oNSjxmbdSZq",
     "name": "account_3",
     "disabled": true
   }

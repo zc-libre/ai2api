@@ -206,3 +206,47 @@ class AccountStore:
             select(Account).where(Account.awsEmail == email)
         )
         return result.scalar_one_or_none()
+
+    async def create_kiro_account(
+        self,
+        access_token: str,
+        csrf_token: str,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> Account:
+        """
+        创建 Kiro 账号（自动注册流程使用）
+
+        Args:
+            access_token: 访问令牌
+            csrf_token: CSRF Token（用于刷新）
+            email: 注册邮箱
+            password: 注册密码
+            label: 账号标签
+
+        Returns:
+            Account: 创建的账号
+        """
+        account = Account(
+            id=generate_cuid(),
+            clientId="",
+            clientSecret="",
+            accessToken=access_token,
+            refreshToken=csrf_token,  # 使用 refreshToken 字段存储 csrf_token
+            awsEmail=email,
+            awsPassword=password,
+            label=label,
+            enabled=True,
+            type="kiro",
+            savedAt=datetime.utcnow(),
+            createdAt=datetime.utcnow(),
+            updatedAt=datetime.utcnow(),
+        )
+
+        self.session.add(account)
+        await self.session.commit()
+        await self.session.refresh(account)
+
+        logger.info(f"Kiro 账号已创建: {account.id} (email: {account.awsEmail})")
+        return account
